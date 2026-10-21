@@ -872,6 +872,30 @@ public sealed class FlaxBridgeClientTests : IDisposable
         Assert.Contains("Registered: status.", exception.Message);
     }
 
+    [Fact]
+    public async Task WaitForEventAsync_SkipsEventsWithoutTheTextAndReturnsTheMatch()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        const string page = "{{\"id\":1,\"result\":{{\"hostStartedUtc\":\"2026-10-14T10:00:00Z\",\"events\":[{0}],\"lastSeq\":{1},\"oldestSeq\":1,\"truncated\":false}}}}";
+        var serverTask = ServeSequenceAsync(
+            pipeName,
+            cancellationToken,
+            ("events_since", string.Format(page, "", 10)),
+            ("events_wait", string.Format(page, "{\"seq\":11,\"utc\":\"2026-10-14T10:00:01Z\",\"kind\":\"log\",\"level\":1,\"text\":\"other\"}", 11)),
+            ("events_wait", string.Format(page, "{\"seq\":13,\"utc\":\"2026-10-14T10:00:02Z\",\"kind\":\"log\",\"level\":1,\"text\":\"[Test] status: ok\"}", 13))
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var result = await client.WaitForEventAsync("log", "[Test]", null, TimeSpan.FromSeconds(10), cancellationToken);
+        await serverTask;
+
+        Assert.True(result.Matched);
+        Assert.Equal(13, result.Event!.Seq);
+        Assert.Equal("[Test] status: ok", result.Event.Text);
+    }
+
     private static async Task ServeSequenceAsync(
         string pipeName,
         CancellationToken cancellationToken,

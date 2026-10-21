@@ -25,6 +25,7 @@ builder.Services.AddSingleton<FlaxEditorSessionGuard>();
 builder.Services.AddSingleton<FlaxBridgeClient>();
 builder.Services.AddSingleton<IFlaxBridgeClient>(services => services.GetRequiredService<FlaxBridgeClient>());
 builder.Services.AddSingleton<IFlaxGameCommandClient>(services => services.GetRequiredService<FlaxBridgeClient>());
+builder.Services.AddSingleton<IFlaxEditorEventClient>(services => services.GetRequiredService<FlaxBridgeClient>());
 builder.Services.AddSingleton<FlaxHeadlessEditorRunner>();
 builder.Services.AddSingleton<FlaxBuildJobManager>();
 builder.Services

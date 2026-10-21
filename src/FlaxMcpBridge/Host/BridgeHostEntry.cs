@@ -18,6 +18,9 @@ public static class BridgeHostEntry
     private static readonly object Gate = new();
     private static BridgeHostServer? _server;
 
+    /// <summary>The editor's recent events: fed by the Flax adapter (Host/Flax), read by clients.</summary>
+    public static BridgeEventRing Events { get; } = new(4096);
+
     /// <summary>Whether the host is running.</summary>
     public static bool IsStarted
     {
@@ -52,7 +55,7 @@ public static class BridgeHostEntry
                 throw new InvalidOperationException("The bridge host is already running.");
             }
 
-            _server = new BridgeHostServer(options);
+            _server = new BridgeHostServer(options, Events);
             _server.Start();
         }
     }

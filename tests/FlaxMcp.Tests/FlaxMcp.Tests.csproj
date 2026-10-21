@@ -23,6 +23,7 @@
     <!-- The bridge host is compiled by the editor plugin at run time; the tests compile the same sources. -->
     <Compile Include="..\..\src\FlaxMcpBridge\Host\BridgeHostServer.cs" Link="Bridge\Host\BridgeHostServer.cs" />
     <Compile Include="..\..\src\FlaxMcpBridge\Host\BridgeHostEntry.cs" Link="Bridge\Host\BridgeHostEntry.cs" />
+    <Compile Include="..\..\src\FlaxMcpBridge\Host\BridgeEventRing.cs" Link="Bridge\Host\BridgeEventRing.cs" />
     <!-- The runtime module's game command registry is pure .NET as well. -->
     <Compile Include="..\..\src\FlaxMcpBridge\Source\FlaxMcpBridge\GameCommands.cs" Link="Bridge\Runtime\GameCommands.cs" />
   </ItemGroup>

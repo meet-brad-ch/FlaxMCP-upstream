@@ -10,6 +10,7 @@ public sealed class BridgeHostServerTests : IDisposable
 {
     private readonly string _tempDir = Path.Combine(Path.GetTempPath(), "FlaxMcpHostTests_" + Guid.NewGuid().ToString("N"));
     private readonly string _pipeName = "FlaxMcpHost-" + Guid.NewGuid().ToString("N");
+    private readonly BridgeEventRing _events = new(8);
     private readonly BridgeHostServer _host;
 
     public BridgeHostServerTests()
@@ -21,7 +22,7 @@ public sealed class BridgeHostServerTests : IDisposable
             Path.Combine(_tempDir, "sessions", "handshake.json"),
             "testversion",
             TimeSpan.FromMilliseconds(500)
-        ));
+        ), _events);
         _host.Start();
     }
 
@@ -149,6 +150,45 @@ public sealed class BridgeHostServerTests : IDisposable
         _host.Dispose();
 
         Assert.False(File.Exists(path));
+    }
+
+    [Fact]
+    public async Task EventsSince_WithoutPlugin_ReturnsTheRecordedEvents()
+    {
+        _events.Append(BridgeEventKind.PlayBegin, 0, null);
+        _events.Append(BridgeEventKind.Log, 1, "hello");
+
+        using var response = JsonDocument.Parse(await AskAsync("{\"id\":2,\"method\":\"events_since\",\"params\":{\"afterSeq\":1}}"));
+
+        var result = response.RootElement.GetProperty("result");
+        var events = result.GetProperty("events");
+        Assert.Equal(1, events.GetArrayLength());
+        Assert.Equal("log", events[0].GetProperty("kind").GetString());
+        Assert.Equal("hello", events[0].GetProperty("text").GetString());
+        Assert.Equal(2, result.GetProperty("lastSeq").GetInt64());
+    }
+
+    [Fact]
+    public async Task EventsWait_ReturnsWhenAMatchingEventIsRecorded()
+    {
+        var answer = AskAsync("{\"id\":3,\"method\":\"events_wait\",\"params\":{\"kinds\":[\"play_begin\"],\"waitMs\":2000}}");
+        await Task.Delay(100, TestContext.Current.CancellationToken);
+        _events.Append(BridgeEventKind.Log, 1, "not this");
+        _events.Append(BridgeEventKind.PlayBegin, 0, null);
+
+        using var response = JsonDocument.Parse(await answer);
+
+        var events = response.RootElement.GetProperty("result").GetProperty("events");
+        Assert.Equal("play_begin", events[0].GetProperty("kind").GetString());
+    }
+
+    [Fact]
+    public async Task EventsSince_WithAnUnknownKind_FailsWithInvalidRequest()
+    {
+        var response = await AskAsync("{\"id\":4,\"method\":\"events_since\",\"params\":{\"kinds\":[\"nope\"]}}");
+
+        Assert.Equal("invalid_request", ErrorCode(response));
+        Assert.Contains("play_begin", response);
     }
 
     [Fact]

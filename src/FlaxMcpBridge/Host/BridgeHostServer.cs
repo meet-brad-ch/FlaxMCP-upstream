@@ -29,6 +29,7 @@ public sealed class BridgeHostServer : IDisposable
     public const string PluginNotAttached = "plugin_not_attached";
 
     private readonly BridgeHostOptions _options;
+    private readonly BridgeEventRing _events;
     private readonly object _gate = new();
     private readonly CancellationTokenSource _stopping = new();
     private readonly List<WeakReference> _pluginContexts = new();
@@ -41,9 +42,11 @@ public sealed class BridgeHostServer : IDisposable
 
     /// <summary>Creates a stopped server.</summary>
     /// <param name="options">The pipe, the handshake file and the waits.</param>
-    public BridgeHostServer(BridgeHostOptions options)
+    /// <param name="events">The editor's recorded events, answered by <c>events_since</c> and <c>events_wait</c>.</param>
+    public BridgeHostServer(BridgeHostOptions options, BridgeEventRing events)
     {
         _options = options;
+        _events = events;
     }
 
     /// <summary>The host's version: a hash of its sources, chosen by whoever compiled it.</summary>
@@ -151,6 +154,7 @@ public sealed class BridgeHostServer : IDisposable
                 ["gen0Collections"] = GC.CollectionCount(0),
                 ["gen1Collections"] = GC.CollectionCount(1),
                 ["gen2Collections"] = GC.CollectionCount(2),
+                ["lastEventSeq"] = _events.LastSeq,
             });
         }
     }
@@ -187,6 +191,11 @@ public sealed class BridgeHostServer : IDisposable
         if (request.Method == "host_status")
         {
             return BridgeHostRequest.Result(request.Id, StatusJson(request.Collect));
+        }
+
+        if (request.Method is "events_since" or "events_wait")
+        {
+            return await EventsAsync(request.Id, line, request.Method == "events_wait", cancellationToken);
         }
 
         var attachment = await WaitForAttachmentAsync(cancellationToken);
@@ -231,6 +240,44 @@ public sealed class BridgeHostServer : IDisposable
     /// <param name="projectFolder">The project folder.</param>
     /// <returns>The file name without its folder.</returns>
     public static string HandshakeFileNameFor(string projectFolder) => Hash(projectFolder) + ".json";
+
+    private async Task<string> EventsAsync(int id, string line, bool wait, CancellationToken cancellationToken)
+    {
+        BridgeEventQuery query;
+        try
+        {
+            query = BridgeEventQuery.Parse(line);
+        }
+        catch (ArgumentException ex)
+        {
+            return BridgeHostRequest.Error(id, "invalid_request", ex.Message);
+        }
+
+        var page = wait ?
+            await _events.WaitAsync(query.AfterSeq, query.Max, query.Kinds, query.Wait, cancellationToken) :
+            _events.Read(query.AfterSeq, query.Max, query.Kinds);
+        var events = new List<Dictionary<string, object?>>(page.Events.Count);
+        foreach (var item in page.Events)
+        {
+            events.Add(new Dictionary<string, object?>
+            {
+                ["seq"] = item.Seq,
+                ["utc"] = new DateTime(item.UtcTicks, DateTimeKind.Utc),
+                ["kind"] = BridgeEventQuery.NameOf(item.Kind),
+                ["level"] = item.Level,
+                ["text"] = item.Text,
+            });
+        }
+
+        return BridgeHostRequest.Result(id, JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["hostStartedUtc"] = _startedUtc,
+            ["events"] = events,
+            ["lastSeq"] = page.LastSeq,
+            ["oldestSeq"] = page.OldestSeq,
+            ["truncated"] = page.Truncated,
+        }));
+    }
 
     private async Task<BridgeHostAttachment?> WaitForAttachmentAsync(CancellationToken cancellationToken)
     {
@@ -352,6 +399,85 @@ public sealed class BridgeHostServer : IDisposable
         var normalized = value.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
         return Convert.ToHexString(bytes)[..16];
+    }
+}
+
+/// <summary>An <c>events_since</c> or <c>events_wait</c> request.</summary>
+/// <param name="AfterSeq">Only events newer than this.</param>
+/// <param name="Max">At most this many (1 to 500).</param>
+/// <param name="Kinds">Only these kinds; null for all.</param>
+/// <param name="Wait">For <c>events_wait</c>: how long to wait for one (at most 2 seconds, under the client's request timeout).</param>
+public sealed record BridgeEventQuery(long AfterSeq, int Max, IReadOnlyCollection<BridgeEventKind>? Kinds, TimeSpan Wait)
+{
+    private static readonly Dictionary<string, BridgeEventKind> Names = new(StringComparer.Ordinal)
+    {
+        ["log"] = BridgeEventKind.Log,
+        ["exception"] = BridgeEventKind.Exception,
+        ["compile_begin"] = BridgeEventKind.CompileBegin,
+        ["compile_succeeded"] = BridgeEventKind.CompileSucceeded,
+        ["compile_failed"] = BridgeEventKind.CompileFailed,
+        ["reload_begin"] = BridgeEventKind.ReloadBegin,
+        ["reload_end"] = BridgeEventKind.ReloadEnd,
+        ["play_begin"] = BridgeEventKind.PlayBegin,
+        ["play_end"] = BridgeEventKind.PlayEnd,
+        ["scene_loaded"] = BridgeEventKind.SceneLoaded,
+        ["scene_load_error"] = BridgeEventKind.SceneLoadError,
+        ["scene_saved"] = BridgeEventKind.SceneSaved,
+        ["scene_save_error"] = BridgeEventKind.SceneSaveError,
+        ["scene_unloaded"] = BridgeEventKind.SceneUnloaded,
+    };
+
+    /// <summary>The wire name of a kind.</summary>
+    /// <param name="kind">The kind.</param>
+    /// <returns>Its name, for example <c>play_begin</c>.</returns>
+    public static string NameOf(BridgeEventKind kind)
+    {
+        foreach (var pair in Names)
+        {
+            if (pair.Value == kind)
+            {
+                return pair.Key;
+            }
+        }
+
+        throw new ArgumentOutOfRangeException(nameof(kind), kind, "The event kind has no wire name.");
+    }
+
+    /// <summary>Reads the query's parameters: afterSeq, max, kinds, waitMs.</summary>
+    /// <param name="line">The request JSON.</param>
+    /// <returns>The query.</returns>
+    /// <exception cref="ArgumentException">A parameter is out of range or names an unknown kind.</exception>
+    public static BridgeEventQuery Parse(string line)
+    {
+        using var document = JsonDocument.Parse(line);
+        var hasParams = document.RootElement.TryGetProperty("params", out var parameters) && parameters.ValueKind == JsonValueKind.Object;
+        var afterSeq = hasParams && parameters.TryGetProperty("afterSeq", out var after) ? after.GetInt64() : 0;
+        var max = hasParams && parameters.TryGetProperty("max", out var maxElement) ? maxElement.GetInt32() : 100;
+        var waitMs = hasParams && parameters.TryGetProperty("waitMs", out var waitElement) ? waitElement.GetInt32() : 0;
+        if (max < 1 || max > 500)
+        {
+            throw new ArgumentException($"max must be 1 to 500, not {max}.");
+        }
+
+        if (waitMs < 0 || waitMs > 2000)
+        {
+            throw new ArgumentException($"waitMs must be 0 to 2000, not {waitMs}.");
+        }
+
+        List<BridgeEventKind>? kinds = null;
+        if (hasParams && parameters.TryGetProperty("kinds", out var kindsElement) && kindsElement.ValueKind == JsonValueKind.Array)
+        {
+            kinds = new List<BridgeEventKind>();
+            foreach (var name in kindsElement.EnumerateArray())
+            {
+                var text = name.GetString() ?? "";
+                kinds.Add(Names.TryGetValue(text, out var kind) ?
+                    kind :
+                    throw new ArgumentException($"Unknown event kind '{text}'. Kinds: {string.Join(", ", Names.Keys)}."));
+            }
+        }
+
+        return new BridgeEventQuery(afterSeq, max, kinds, TimeSpan.FromMilliseconds(waitMs));
     }
 }
 

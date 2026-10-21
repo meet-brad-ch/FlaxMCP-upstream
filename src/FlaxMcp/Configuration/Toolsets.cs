@@ -15,7 +15,8 @@ public static class Toolsets
         ["build"] = typeof(BuildTools),
         ["logs"] = typeof(LogTools),
         ["editor"] = typeof(EditorTools),
-        ["game"] = typeof(GameTools)
+        ["game"] = typeof(GameTools),
+        ["events"] = typeof(EditorEventTools)
     };
 
     public static IReadOnlyCollection<string> Names => Registry.Keys;

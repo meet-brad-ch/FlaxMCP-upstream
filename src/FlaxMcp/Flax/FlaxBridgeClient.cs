@@ -108,9 +108,22 @@ public interface IFlaxGameCommandClient
     Task<FlaxGameCommandResult> RunGameCommandAsync(string name, string args, CancellationToken cancellationToken = default);
 }
 
-public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
+/// <summary>The editor's recorded events (the bridge host's ring: log lines, compiles, reloads, play mode, scenes).</summary>
+public interface IFlaxEditorEventClient
 {
-    internal const int CurrentProtocolVersion = 17;
+    /// <summary>The events after a sequence number, optionally waiting up to 2 seconds for one.</summary>
+    Task<FlaxEditorEventPage> GetEventsAsync(
+        long afterSeq, IReadOnlyList<string>? kinds, int max, int waitMilliseconds, CancellationToken cancellationToken = default);
+
+    /// <summary>Waits for the first event of a kind (and text) after a sequence number, or the current end.</summary>
+    Task<FlaxEditorEventWait> WaitForEventAsync(
+        string kind, string? textContains, long? afterSeq, TimeSpan timeout, CancellationToken cancellationToken = default);
+}
+
+public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient, IFlaxEditorEventClient
+{
+    internal const int CurrentProtocolVersion = 18;
+    private const int EventWaitMilliseconds = 2000;
     internal const string InterruptedByReload = "interrupted_by_reload";
     internal const string PluginNotAttached = "plugin_not_attached";
 
@@ -118,7 +131,7 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
     private static readonly HashSet<string> QueryMethods =
     [
         "ping", "scene_graph", "get_selection", "actor_details", "static_model_details", "material_details",
-        "box_collider_details", "play_mode_state", "compile_status", "host_status", "game_commands",
+        "box_collider_details", "play_mode_state", "compile_status", "host_status", "game_commands", "events_since",
     ];
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
@@ -541,6 +554,44 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
         return CallAsync<FlaxBridgeHostStatus>(RequireHandshake(), "host_status", new { collect }, cancellationToken);
     }
 
+    public Task<FlaxEditorEventPage> GetEventsAsync(
+        long afterSeq, IReadOnlyList<string>? kinds, int max, int waitMilliseconds, CancellationToken cancellationToken = default)
+    {
+        return CallAsync<FlaxEditorEventPage>(
+            RequireHandshake(),
+            waitMilliseconds > 0 ? "events_wait" : "events_since",
+            new { afterSeq, kinds, max, waitMs = waitMilliseconds },
+            cancellationToken
+        );
+    }
+
+    public async Task<FlaxEditorEventWait> WaitForEventAsync(
+        string kind, string? textContains, long? afterSeq, TimeSpan timeout, CancellationToken cancellationToken = default)
+    {
+        var watch = Stopwatch.StartNew();
+        var after = afterSeq ?? (await GetEventsAsync(0, [kind], 1, 0, cancellationToken)).LastSeq;
+        while (true)
+        {
+            var left = timeout - watch.Elapsed;
+            var wait = (int)Math.Clamp(left.TotalMilliseconds, 1, EventWaitMilliseconds);
+            var page = await GetEventsAsync(after, [kind], 500, wait, cancellationToken);
+            foreach (var item in page.Events)
+            {
+                if (textContains is null || item.Text?.Contains(textContains, StringComparison.Ordinal) == true)
+                {
+                    return new FlaxEditorEventWait(true, item, page.LastSeq, false, watch.Elapsed.TotalSeconds);
+                }
+            }
+
+            // a full page may hold more matches than it returned: go on from its last event, else from the end
+            after = page.Events.Count == 500 ? page.Events[^1].Seq : Math.Max(after, page.LastSeq);
+            if (watch.Elapsed >= timeout)
+            {
+                return new FlaxEditorEventWait(false, null, page.LastSeq, true, watch.Elapsed.TotalSeconds);
+            }
+        }
+    }
+
     public Task<FlaxGameCommandList> ListGameCommandsAsync(CancellationToken cancellationToken = default)
     {
         return CallAsync<FlaxGameCommandList>(RequireHandshake(), "game_commands", null, cancellationToken);
@@ -808,6 +859,17 @@ public sealed class FlaxBridgeRequestException(string code, string message)
 public sealed record FlaxBridgeScreenshot(string Path, long Bytes);
 
 public sealed record FlaxGameCommandList(IReadOnlyList<FlaxGameCommandInfo> Commands);
+
+public sealed record FlaxEditorEvent(long Seq, DateTime Utc, string Kind, int Level, string? Text);
+
+public sealed record FlaxEditorEventPage(
+    DateTime HostStartedUtc,
+    IReadOnlyList<FlaxEditorEvent> Events,
+    long LastSeq,
+    long OldestSeq,
+    bool Truncated);
+
+public sealed record FlaxEditorEventWait(bool Matched, FlaxEditorEvent? Event, long LastSeq, bool TimedOut, double Seconds);
 
 public sealed record FlaxGameCommandInfo(string Name, string Description, string Owner);
 

@@ -22,6 +22,7 @@ namespace FlaxMcpBridge.Editor;
 internal static class HostBootstrap
 {
     private const string EntryTypeName = "FlaxMcpBridge.Host.BridgeHostEntry";
+    private const string EventsTypeName = "FlaxMcpBridge.Host.Flax.BridgeHostFlaxEvents";
     private const string AssemblyPrefix = "FlaxMcpBridgeHost-";
     private const string MarkerFile = "BridgeHostEntry.cs";
     private const double AttachWaitSeconds = 10;
@@ -34,7 +35,7 @@ internal static class HostBootstrap
     public static void Attach(long generation, int protocolVersion, Func<string, Task<string>> dispatch)
     {
         var folder = SourceFolder();
-        var files = Directory.GetFiles(folder, "*.cs").OrderBy(file => file, StringComparer.Ordinal).ToArray();
+        var files = Directory.GetFiles(folder, "*.cs", SearchOption.AllDirectories).OrderBy(file => file, StringComparer.Ordinal).ToArray();
         var sources = files.Select(File.ReadAllText).ToArray();
         var version = Version(sources);
         var entry = LoadedEntry(version) ?? Compile(version, files, sources);
@@ -51,6 +52,8 @@ internal static class HostBootstrap
             }));
         }
 
+        // The editor's events feed the host's ring from the first attach on (later calls do nothing).
+        Invoke(entry.Assembly.GetType(EventsTypeName, throwOnError: true)!, "Start");
         Invoke(entry, "Attach", JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["generation"] = generation,
@@ -131,7 +134,8 @@ internal static class HostBootstrap
         var compilation = CSharpCompilation.Create(
             AssemblyPrefix + version,
             trees,
-            platform.Where(IsManaged).Select(path => MetadataReference.CreateFromFile(path)),
+            // The engine's managed assembly is in the Default load context too: the host may use it.
+            platform.Where(IsManaged).Append(typeof(Debug).Assembly.Location).Select(path => MetadataReference.CreateFromFile(path)),
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
                 optimizationLevel: OptimizationLevel.Release,
