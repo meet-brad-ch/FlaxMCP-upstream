@@ -19,6 +19,9 @@ public sealed class FlaxMcpOptions
 
     public string EditorConfig { get; set; } = DefaultEditorConfig;
 
+    /// <summary>Whether <see cref="EditorConfig"/> was set (FLAX_EDITOR_CONFIG), not the default.</summary>
+    public bool EditorConfigSet { get; set; }
+
     public string? Toolsets { get; set; }
 
     public bool ReadOnly { get; set; }
@@ -31,6 +34,7 @@ public sealed class FlaxMcpOptions
     {
         ProjectPath = Environment.GetEnvironmentVariable(ProjectPathVariable) ?? string.Empty;
         EnginePath = Environment.GetEnvironmentVariable(EnginePathVariable);
+        EditorConfigSet = Environment.GetEnvironmentVariable(EditorConfigVariable) is { Length: > 0 };
         EditorConfig = Environment.GetEnvironmentVariable(EditorConfigVariable) is { Length: > 0 } config ?
             config :
             DefaultEditorConfig;

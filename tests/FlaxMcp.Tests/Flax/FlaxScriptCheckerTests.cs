@@ -121,12 +121,39 @@ public sealed class FlaxScriptCheckerTests : IDisposable
         Assert.Equal(2, result.Modules.Single().Sources);
     }
 
+    [Fact]
+    public async Task Check_WithoutAConfiguration_ReadsTheEditorsLastBuild()
+    {
+        // Development's arguments are stale: Tools there lacks its reference to Core, as after the editor switched to
+        // Release and a module dependency was added (the check failed on a missing namespace)
+        WriteModule("Core", "public static class Answer { public static int Value => 42; }");
+        WriteModule("Tools", "public static class Use { public static int Twice => Answer.Value * 2; }");
+        foreach (var response in Directory.EnumerateFiles(_intermediate))
+        {
+            File.SetLastWriteTimeUtc(response, DateTime.UtcNow.AddHours(-2));
+        }
+
+        var release = Path.Combine(Path.GetDirectoryName(_intermediate)!, "Release");
+        WriteModule("Core", "public static class Answer { public static int Value => 42; }", configurationFolder: release);
+        WriteModule("Tools", "public static class Use { public static int Twice => Answer.Value * 2; }", dependsOn: "Core", configurationFolder: release);
+
+        var stale = await Checker().CheckAsync(TestContext.Current.CancellationToken);
+        var last = await new FlaxScriptChecker(Path.Combine(_project, "Game.flaxproj"), null, Path.Combine(_root, "scratch"), null)
+            .CheckAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal("failed", stale.Status);
+        Assert.Equal("passed", last.Status);
+    }
+
     private FlaxScriptChecker Checker() =>
         new(Path.Combine(_project, "Game.flaxproj"), "Development", Path.Combine(_root, "scratch"), null);
 
-    /// <summary>A module the way Flax.Build leaves it: its folder with a .Build.cs and one source, and its response file.</summary>
-    private void WriteModule(string name, string code, string? dependsOn = null)
+    /// <summary>A module the way Flax.Build leaves it: its folder with a .Build.cs and one source, and its response file
+    /// (in <paramref name="configurationFolder"/>, Development's by default).</summary>
+    private void WriteModule(string name, string code, string? dependsOn = null, string? configurationFolder = null)
     {
+        var intermediate = configurationFolder ?? _intermediate;
+        Directory.CreateDirectory(intermediate);
         var folder = Path.Combine(_project, "Source", name);
         Directory.CreateDirectory(folder);
         File.WriteAllText(Path.Combine(folder, name + ".Build.cs"), "// the module's build script");
@@ -148,7 +175,7 @@ public sealed class FlaxScriptCheckerTests : IDisposable
         }
 
         lines.Add($"\"{source}\"");
-        File.WriteAllLines(Path.Combine(_intermediate, name + ".CSharp.response"), lines);
+        File.WriteAllLines(Path.Combine(intermediate, name + ".CSharp.response"), lines);
     }
 
     private string Output(string module) => Path.Combine(_project, "Binaries", module + ".CSharp.dll");

@@ -28,21 +28,26 @@ public sealed partial class FlaxScriptChecker : IFlaxScriptChecker
 {
     private static readonly TimeSpan CompileTimeout = TimeSpan.FromMinutes(2);
     private readonly string _projectFile;
-    private readonly string _configuration;
+    private readonly string? _configuration;
     private readonly string _scratchRoot;
     private readonly string? _dotnetRoot;
 
     public FlaxScriptChecker(IOptions<FlaxMcpOptions> options)
-        : this(options.Value.ResolveProjectFile(), options.Value.EditorConfig, Path.Combine(Path.GetTempPath(), "FlaxMcp", "check"), null)
+        : this(options.Value.ResolveProjectFile(), options.Value.EditorConfigSet ? options.Value.EditorConfig : null,
+            Path.Combine(Path.GetTempPath(), "FlaxMcp", "check"), null)
     {
     }
 
     /// <summary>Creates a checker.</summary>
     /// <param name="projectFile">The project's .flaxproj.</param>
-    /// <param name="configuration">The editor build configuration (Development, Debug, Release).</param>
+    /// <param name="configuration">
+    /// The editor build configuration (Development, Debug, Release); null for the one the editor built last (the newest
+    /// response files): an editor run in another configuration than the default left the default's arguments stale, and
+    /// the check failed on references they lacked.
+    /// </param>
     /// <param name="scratchRoot">Where the check's outputs go.</param>
     /// <param name="dotnetRoot">The .NET installation; null to find it on the PATH.</param>
-    internal FlaxScriptChecker(string projectFile, string configuration, string scratchRoot, string? dotnetRoot)
+    internal FlaxScriptChecker(string projectFile, string? configuration, string scratchRoot, string? dotnetRoot)
     {
         _projectFile = projectFile;
         _configuration = configuration;
@@ -234,6 +239,7 @@ public sealed partial class FlaxScriptChecker : IFlaxScriptChecker
     private List<FlaxCscModule> FindModules()
     {
         var modules = new List<FlaxCscModule>();
+        string? configuration = _configuration;
         foreach (var project in Projects())
         {
             var info = FlaxProjectReader.Read(project);
@@ -243,7 +249,15 @@ public sealed partial class FlaxScriptChecker : IFlaxScriptChecker
             }
 
             var projectFolder = Path.GetDirectoryName(project)!;
-            var intermediate = Path.Combine(projectFolder, "Cache", "Intermediate", info.EditorTarget, PlatformName(), ArchitectureName(), _configuration);
+            var target = Path.Combine(projectFolder, "Cache", "Intermediate", info.EditorTarget, PlatformName(), ArchitectureName());
+            // the main project decides the configuration; the editor builds its referenced projects in the same one
+            configuration ??= NewestConfiguration(target);
+            if (configuration is null)
+            {
+                continue;
+            }
+
+            var intermediate = Path.Combine(target, configuration);
             if (!Directory.Exists(intermediate))
             {
                 continue;
@@ -256,6 +270,23 @@ public sealed partial class FlaxScriptChecker : IFlaxScriptChecker
         }
 
         return modules;
+    }
+
+    /// <summary>The configuration folder under <paramref name="target"/> with the newest compiler response file (the
+    /// editor's last build); null when none has one.</summary>
+    private static string? NewestConfiguration(string target)
+    {
+        if (!Directory.Exists(target))
+        {
+            return null;
+        }
+
+        return Directory.EnumerateDirectories(target)
+            .Select(folder => new { Folder = folder, Newest = Directory.EnumerateFiles(folder, "*.CSharp.response").Select(File.GetLastWriteTimeUtc).DefaultIfEmpty().Max() })
+            .Where(candidate => candidate.Newest != default)
+            .OrderByDescending(candidate => candidate.Newest)
+            .Select(candidate => Path.GetFileName(candidate.Folder))
+            .FirstOrDefault();
     }
 
     /// <summary>The project and the projects it references, except the engine.</summary>
