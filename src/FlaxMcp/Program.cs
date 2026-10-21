@@ -22,7 +22,9 @@ builder.Logging.SetMinimumLevel(
 builder.Services.AddSingleton<IValidateOptions<FlaxMcpOptions>, FlaxMcpOptionsValidator>();
 builder.Services.AddSingleton<FlaxContentIndex>();
 builder.Services.AddSingleton<FlaxEditorSessionGuard>();
-builder.Services.AddSingleton<IFlaxBridgeClient, FlaxBridgeClient>();
+builder.Services.AddSingleton<FlaxBridgeClient>();
+builder.Services.AddSingleton<IFlaxBridgeClient>(services => services.GetRequiredService<FlaxBridgeClient>());
+builder.Services.AddSingleton<IFlaxGameCommandClient>(services => services.GetRequiredService<FlaxBridgeClient>());
 builder.Services.AddSingleton<FlaxHeadlessEditorRunner>();
 builder.Services.AddSingleton<FlaxBuildJobManager>();
 builder.Services

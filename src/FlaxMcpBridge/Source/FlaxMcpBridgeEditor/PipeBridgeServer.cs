@@ -27,7 +27,7 @@ namespace FlaxMcpBridge.Editor;
 /// </summary>
 internal sealed class PipeBridgeServer : IDisposable
 {
-    private const int ProtocolVersion = 16;
+    private const int ProtocolVersion = 17;
     private static readonly long LoadedUtcTicks = DateTime.UtcNow.Ticks;
     private const int MaxSceneGraphDepth = 32;
     private const int MaxSceneGraphNodes = 500;
@@ -63,6 +63,10 @@ internal sealed class PipeBridgeServer : IDisposable
             }
 
             return await dispatch;
+        }
+        catch (BridgeRequestException ex)
+        {
+            return SerializeError(ReadRequestId(line), ex.Code, ex.Message);
         }
         catch (Exception ex)
         {
@@ -185,6 +189,8 @@ internal sealed class PipeBridgeServer : IDisposable
             "open_scene" => await OpenSceneAsync(RequireParam(root, "path")),
             "screenshot" => await CaptureScreenshotAsync(RequireParam(root, "path")),
             "execute_csharp" => await ExecuteCSharpAsync(RequireParam(root, "code")),
+            "game_commands" => ListGameCommands(),
+            "game_command" => await RunGameCommandAsync(RequireParam(root, "name"), OptionalParam(root, "args") ?? ""),
             _ => throw new InvalidOperationException($"Unknown method '{method}'"),
         };
 
@@ -1529,6 +1535,48 @@ internal sealed class PipeBridgeServer : IDisposable
         };
     }
 
+    private static object ListGameCommands()
+    {
+        return new
+        {
+            commands = GameCommands.List()
+                .Select(command => new { name = command.Name, description = command.Description, owner = command.Owner })
+                .ToArray(),
+        };
+    }
+
+    private static Task<object> RunGameCommandAsync(string name, string args)
+    {
+        var command = GameCommands.Find(name) ??
+            throw new BridgeRequestException(
+                "unknown_command",
+                $"No game command '{name}' is registered. Registered: " +
+                $"{string.Join(", ", GameCommands.List().Select(info => info.Name).DefaultIfEmpty("none"))}."
+            );
+        var tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
+        OnMainThread(() =>
+        {
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                var result = command.Handler(args);
+                tcs.TrySetResult(new
+                {
+                    mainThreadId = Globals.MainThreadID,
+                    name,
+                    result,
+                    milliseconds = watch.Elapsed.TotalMilliseconds,
+                    isPlayMode = FlaxEditor.Editor.IsPlayMode,
+                });
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(new BridgeRequestException("command_failed", $"{ex.GetType().Name}: {ex.Message}"));
+            }
+        });
+        return tcs.Task;
+    }
+
     private static Task<object> InvokeOnUpdateAsync(Func<object> action)
     {
         var tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -1626,6 +1674,8 @@ internal sealed class PipeBridgeServer : IDisposable
         lastCompilationFailed = FlaxEditor.ScriptsBuilder.LastCompilationFailed,
         compilationsCount = FlaxEditor.ScriptsBuilder.CompilationsCount,
         loadedUtcTicks = LoadedUtcTicks,
+        // The editor's file watcher marks changed sources; while set, the editor compiles (and reloads) again on its own.
+        isSourceDirty = FlaxEditor.ScriptsBuilder.IsSourceDirty,
     };
 
     private static Task<object> CompileAsync()
@@ -1635,7 +1685,15 @@ internal sealed class PipeBridgeServer : IDisposable
             if (FlaxEditor.Editor.IsPlayMode)
                 throw new InvalidOperationException("The editor is in play mode: stop it before compiling.");
             var before = CompileStatus();
-            FlaxEditor.ScriptsBuilder.Compile();
+            // The editor compiles changed sources on its own (its file watcher marks them, then it compiles and
+            // reloads): a compile on top of that reloads a second time. Changed sources go through the editor's own
+            // check; only unchanged ones are compiled explicitly.
+            if (FlaxEditor.ScriptsBuilder.IsCompiling)
+                return before;
+            if (FlaxEditor.ScriptsBuilder.IsSourceDirty)
+                FlaxEditor.ScriptsBuilder.CheckForCompile();
+            else
+                FlaxEditor.ScriptsBuilder.Compile();
             return before;
         });
     }
@@ -1809,11 +1867,15 @@ internal sealed class PipeBridgeServer : IDisposable
     {
         if (!string.IsNullOrEmpty(assembly.Location))
             return assembly.Location;
-        var binaries = Path.Combine(Globals.ProjectFolder, "Binaries");
         var name = assembly.GetName().Name;
-        if (name is null || !Directory.Exists(binaries))
+        if (name is null)
             return null;
-        return Directory.EnumerateFiles(binaries, name + ".dll", SearchOption.AllDirectories)
+        // Each project builds into its own Binaries/ (a plugin such as this bridge too); the engine's are skipped.
+        return FlaxEditor.Editor.Instance.GameProject.GetAllProjects()
+            .Select(project => Path.Combine(project.ProjectFolderPath, "Binaries"))
+            .Where(binaries => Directory.Exists(binaries) &&
+                               !Path.GetFullPath(binaries).StartsWith(Path.GetFullPath(Globals.StartupFolder), StringComparison.OrdinalIgnoreCase))
+            .SelectMany(binaries => Directory.EnumerateFiles(binaries, name + ".dll", SearchOption.AllDirectories))
             .OrderByDescending(File.GetLastWriteTimeUtc)
             .FirstOrDefault();
     }

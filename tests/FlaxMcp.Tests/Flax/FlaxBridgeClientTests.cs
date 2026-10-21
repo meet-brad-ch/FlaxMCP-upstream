@@ -654,6 +654,8 @@ public sealed class FlaxBridgeClientTests : IDisposable
             ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
             ("compile", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
             ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}"),
             ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}")
         );
         var client = new FlaxBridgeClient(_projectFolder, _tempDir);
@@ -663,6 +665,34 @@ public sealed class FlaxBridgeClientTests : IDisposable
 
         Assert.Equal("reloaded", result.Outcome);
         Assert.Empty(result.Errors);
+        Assert.Equal(1, result.Reloads);
+    }
+
+    [Fact]
+    public async Task CompileAsync_WhenTheEditorCompilesAgainOnItsOwn_WaitsForTheSecondReload()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var settled300 = "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":6,\"loadedUtcTicks\":300}}";
+        var serverTask = ServeSequenceAsync(
+            pipeName,
+            TestContext.Current.CancellationToken,
+            ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
+            ("compile", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200,\"isSourceDirty\":true}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":6,\"loadedUtcTicks\":200}}"),
+            ("compile_status", settled300),
+            ("compile_status", settled300),
+            ("compile_status", settled300)
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var result = await client.CompileAsync(TestContext.Current.CancellationToken);
+        await serverTask;
+
+        Assert.Equal("reloaded", result.Outcome);
+        Assert.Equal(2, result.Reloads);
     }
 
     [Fact]
@@ -758,6 +788,8 @@ public sealed class FlaxBridgeClientTests : IDisposable
             ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
             ("compile", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
             ("compile_status", "{\"id\":1,\"error\":{\"code\":\"plugin_not_attached\",\"message\":\"reloading\"}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}"),
             ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}")
         );
         var client = new FlaxBridgeClient(_projectFolder, _tempDir);
@@ -815,6 +847,29 @@ public sealed class FlaxBridgeClientTests : IDisposable
         Assert.Equal("abc", status.HostVersion);
         Assert.Equal(3, status.AttachCount);
         Assert.Equal(1, status.PluginContextsAlive);
+    }
+
+    [Fact]
+    public async Task RunGameCommandAsync_WithAnUnknownName_ReportsUnknownCommand()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var serverTask = ServeResponseAsync(
+            pipeName,
+            "{\"id\":1,\"error\":{\"code\":\"unknown_command\",\"message\":\"Registered: status.\"}}",
+            cancellationToken,
+            "game_command",
+            "\"name\":\"stauts\""
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var exception = await Assert.ThrowsAsync<FlaxBridgeRequestException>(() =>
+            client.RunGameCommandAsync("stauts", "", cancellationToken));
+        await serverTask;
+
+        Assert.Equal("unknown_command", exception.Code);
+        Assert.Contains("Registered: status.", exception.Message);
     }
 
     private static async Task ServeSequenceAsync(

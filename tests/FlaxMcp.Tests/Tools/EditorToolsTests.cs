@@ -358,7 +358,7 @@ public sealed class EditorToolsTests
     [Fact]
     public async Task CompileAsync_ReturnsBridgeResult()
     {
-        var expected = new FlaxEditorCompileResult("reloaded", 1.2, [], []);
+        var expected = new FlaxEditorCompileResult("reloaded", 1.2, [], [], 1);
         var bridge = new StubBridgeClient { CompileResult = expected };
         var tool = new EditorTools(bridge);
 
@@ -713,7 +713,7 @@ public sealed class EditorToolsTests
             return Task.FromResult(CodeExecutionResult);
         }
 
-        public FlaxEditorCompileResult CompileResult { get; set; } = new("unchanged", 0, [], []);
+        public FlaxEditorCompileResult CompileResult { get; set; } = new("unchanged", 0, [], [], 0);
 
         public FlaxEditorOpenSceneResult OpenSceneResult { get; set; } = new(0, "", "", []);
 
