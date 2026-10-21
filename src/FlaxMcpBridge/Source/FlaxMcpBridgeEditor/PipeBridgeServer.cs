@@ -1387,7 +1387,8 @@ internal sealed partial class PipeBridgeServer : IDisposable
 
     private static bool IsFinite(Vector3 value)
     {
-        return float.IsFinite(value.X) && float.IsFinite(value.Y) && float.IsFinite(value.Z);
+        // Vector3's components are float, or double in an engine built with large worlds (USE_LARGE_WORLDS)
+        return double.IsFinite(value.X) && double.IsFinite(value.Y) && double.IsFinite(value.Z);
     }
 
     private static object BuildBoxColliderDetails(BoxCollider actor)
@@ -1403,6 +1404,12 @@ internal sealed partial class PipeBridgeServer : IDisposable
     }
 
     private static object BuildVector3(float x, float y, float z)
+    {
+        return new { x, y, z };
+    }
+
+    /// <summary>A double vector: Vector3's components in an engine built with large worlds.</summary>
+    private static object BuildVector3(double x, double y, double z)
     {
         return new { x, y, z };
     }
