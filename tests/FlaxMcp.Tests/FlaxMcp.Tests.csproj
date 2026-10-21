@@ -19,4 +19,10 @@
     <ProjectReference Include="..\..\src\FlaxMcp\FlaxMcp.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The bridge host is compiled by the editor plugin at run time; the tests compile the same sources. -->
+    <Compile Include="..\..\src\FlaxMcpBridge\Host\BridgeHostServer.cs" Link="Bridge\Host\BridgeHostServer.cs" />
+    <Compile Include="..\..\src\FlaxMcpBridge\Host\BridgeHostEntry.cs" Link="Bridge\Host\BridgeHostEntry.cs" />
+  </ItemGroup>
+
 </Project>
