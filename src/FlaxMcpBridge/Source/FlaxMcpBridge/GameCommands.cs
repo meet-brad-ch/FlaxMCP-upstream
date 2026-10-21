@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -30,17 +31,28 @@ public static class GameCommands
     public static GameCommandRegistration Register(string name, string description, Func<string, string> handler)
     {
         if (!IsValidName(name))
+        {
             throw new ArgumentException($"Game command name '{name}' must be lowercase letters, digits and dashes, starting with a letter.", nameof(name));
-        if (string.IsNullOrWhiteSpace(description))
-            throw new ArgumentException($"Game command '{name}' needs a description.", nameof(description));
-        if (handler is null)
-            throw new ArgumentNullException(nameof(handler));
+        }
 
-        var command = new GameCommand(new GameCommandInfo(name, description, handler.Method.DeclaringType?.FullName ?? "?"), handler);
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            throw new ArgumentException($"Game command '{name}' needs a description.", nameof(description));
+        }
+
+        if (handler is null)
+        {
+            throw new ArgumentNullException(nameof(handler));
+        }
+
+        var command = new GameCommand(new GameCommandInfo(name, description, OwnerOf(handler)), handler);
         lock (Gate)
         {
             if (_commands.Any(existing => existing.Info.Name == name))
+            {
                 throw new InvalidOperationException($"Game command '{name}' is already registered by {Find(name)!.Info.Owner}.");
+            }
+
             Volatile.Write(ref _commands, _commands.Append(command).ToArray());
         }
 
@@ -58,15 +70,33 @@ public static class GameCommands
     public static GameCommand? Find(string name) =>
         Volatile.Read(ref _commands).FirstOrDefault(command => command.Info.Name == name);
 
+    /// <summary>The type that wrote the handler: a lambda's compiler-made closure class names its enclosing type.</summary>
+    private static string OwnerOf(Delegate handler)
+    {
+        var type = handler.Method.DeclaringType;
+        while (type is not null && type.Name.Contains('<') && type.DeclaringType is not null)
+        {
+            type = type.DeclaringType;
+        }
+
+        return type?.FullName ?? "?";
+    }
+
     private static bool IsValidName(string name)
     {
         if (string.IsNullOrEmpty(name) || name[0] < 'a' || name[0] > 'z')
+        {
             return false;
+        }
+
         foreach (var c in name)
         {
             if (!(c >= 'a' && c <= 'z') && !(c >= '0' && c <= '9') && c != '-')
+            {
                 return false;
+            }
         }
+
         return true;
     }
 
@@ -134,6 +164,8 @@ public sealed class GameCommandRegistration : IDisposable
     {
         var command = Interlocked.Exchange(ref _command, null);
         if (command is not null)
+        {
             GameCommands.Unregister(command);
+        }
     }
 }
