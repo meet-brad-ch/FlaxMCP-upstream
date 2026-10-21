@@ -121,9 +121,31 @@ public interface IFlaxEditorEventClient
         string kind, string? textContains, long? afterSeq, TimeSpan timeout, CancellationToken cancellationToken = default);
 }
 
-public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient, IFlaxEditorEventClient
+/// <summary>Typed access to live objects: find actors, read and write members, call methods, add scripts.</summary>
+public interface IFlaxEditorObjectClient
 {
-    internal const int CurrentProtocolVersion = 18;
+    /// <summary>Finds actors by name, actor type and script type.</summary>
+    Task<FlaxFoundActors> FindActorsAsync(
+        string? nameContains, string? actorType, string? scriptType, int limit, CancellationToken cancellationToken = default);
+
+    /// <summary>Reads a member of an actor or of one of its scripts.</summary>
+    Task<FlaxMemberValue> GetMemberAsync(string actorId, string? scriptType, string member, CancellationToken cancellationToken = default);
+
+    /// <summary>Writes a member of an actor or of one of its scripts.</summary>
+    Task<FlaxMemberValue> SetMemberAsync(
+        string actorId, string? scriptType, string member, JsonElement value, CancellationToken cancellationToken = default);
+
+    /// <summary>Calls an instance or static method.</summary>
+    Task<FlaxMethodResult> InvokeMethodAsync(
+        string? typeName, string method, string? actorId, string? scriptType, JsonElement args, CancellationToken cancellationToken = default);
+
+    /// <summary>Adds a script to an actor.</summary>
+    Task<FlaxAddedScript> AddScriptAsync(string actorId, string scriptType, int? orderInParent, CancellationToken cancellationToken = default);
+}
+
+public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient, IFlaxEditorEventClient, IFlaxEditorObjectClient
+{
+    internal const int CurrentProtocolVersion = 19;
     private const int EventWaitMilliseconds = 2000;
     internal const string InterruptedByReload = "interrupted_by_reload";
     internal const string PluginNotAttached = "plugin_not_attached";
@@ -133,6 +155,7 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
     [
         "ping", "scene_graph", "get_selection", "actor_details", "static_model_details", "material_details",
         "box_collider_details", "play_mode_state", "compile_status", "host_status", "game_commands", "events_since",
+        "find_actors", "get_member",
     ];
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
@@ -599,6 +622,35 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
         }
     }
 
+    public Task<FlaxFoundActors> FindActorsAsync(
+        string? nameContains, string? actorType, string? scriptType, int limit, CancellationToken cancellationToken = default)
+    {
+        return CallAsync<FlaxFoundActors>(RequireHandshake(), "find_actors", new { nameContains, actorType, scriptType, limit }, cancellationToken);
+    }
+
+    public Task<FlaxMemberValue> GetMemberAsync(string actorId, string? scriptType, string member, CancellationToken cancellationToken = default)
+    {
+        return CallAsync<FlaxMemberValue>(RequireHandshake(), "get_member", new { actorId, scriptType, member }, cancellationToken);
+    }
+
+    public Task<FlaxMemberValue> SetMemberAsync(
+        string actorId, string? scriptType, string member, JsonElement value, CancellationToken cancellationToken = default)
+    {
+        return CallAsync<FlaxMemberValue>(RequireHandshake(), "set_member", new { actorId, scriptType, member, value }, cancellationToken);
+    }
+
+    public Task<FlaxMethodResult> InvokeMethodAsync(
+        string? typeName, string method, string? actorId, string? scriptType, JsonElement args, CancellationToken cancellationToken = default)
+    {
+        return CallAsync<FlaxMethodResult>(
+            RequireHandshake(), "invoke_method", new { typeName, method, actorId, scriptType, args }, cancellationToken);
+    }
+
+    public Task<FlaxAddedScript> AddScriptAsync(string actorId, string scriptType, int? orderInParent, CancellationToken cancellationToken = default)
+    {
+        return CallAsync<FlaxAddedScript>(RequireHandshake(), "add_script", new { actorId, scriptType, orderInParent }, cancellationToken);
+    }
+
     public Task<FlaxGameCommandList> ListGameCommandsAsync(CancellationToken cancellationToken = default)
     {
         return CallAsync<FlaxGameCommandList>(RequireHandshake(), "game_commands", null, cancellationToken);
@@ -866,6 +918,30 @@ public sealed class FlaxBridgeRequestException(string code, string message)
 public sealed record FlaxBridgeScreenshot(string Path, long Bytes);
 
 public sealed record FlaxGameCommandList(IReadOnlyList<FlaxGameCommandInfo> Commands);
+
+public sealed record FlaxFoundActor(string Id, string Name, string TypeName, string Path, IReadOnlyList<string> Scripts);
+
+public sealed record FlaxFoundActors(int MainThreadId, IReadOnlyList<FlaxFoundActor> Actors, bool Truncated);
+
+public sealed record FlaxMemberValue(
+    int MainThreadId,
+    string TargetId,
+    string TargetType,
+    string Member,
+    string? TypeName,
+    JsonElement? Value,
+    bool? RecordedUndo = null);
+
+public sealed record FlaxMethodResult(int MainThreadId, string Method, string? TypeName, JsonElement? Result);
+
+public sealed record FlaxAddedScript(
+    int MainThreadId,
+    string ActorId,
+    string ScriptId,
+    string ScriptType,
+    bool Added,
+    int OrderInParent,
+    IReadOnlyList<string> Scripts);
 
 public sealed record FlaxEditorEvent(long Seq, DateTime Utc, string Kind, int Level, string? Text);
 

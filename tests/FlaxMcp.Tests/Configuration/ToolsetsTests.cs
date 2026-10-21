@@ -11,10 +11,20 @@ public sealed class ToolsetsTests
     {
         var types = Toolsets.Resolve(null);
 
-        Assert.Equal(Toolsets.Names.Count, types.Count);
+        Assert.Equal(types.Distinct().Count(), types.Count);
         Assert.Contains(typeof(ServerInfoTool), types);
         Assert.Contains(typeof(ProjectTools), types);
         Assert.Contains(typeof(EditorTools), types);
+        Assert.Contains(typeof(EditorObjectTools), types);
+        Assert.Contains(typeof(JobTools), types);
+    }
+
+    [Fact]
+    public void Resolve_Editor_ReturnsBothEditorToolClasses()
+    {
+        var types = Toolsets.Resolve("editor");
+
+        Assert.Equal([typeof(ServerInfoTool), typeof(EditorTools), typeof(EditorObjectTools)], types);
     }
 
     [Fact]

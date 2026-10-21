@@ -23,9 +23,9 @@ namespace FlaxMcpBridge.Editor;
 /// Answers bridge requests for one plugin generation. The pipe belongs to the bridge host (Host/), which outlives
 /// script reloads; this class is what each reloaded plugin attaches to it.
 /// </summary>
-internal sealed class PipeBridgeServer : IDisposable
+internal sealed partial class PipeBridgeServer : IDisposable
 {
-    private const int ProtocolVersion = 18;
+    private const int ProtocolVersion = 19;
     private static readonly long LoadedUtcTicks = DateTime.UtcNow.Ticks;
     private const int MaxSceneGraphDepth = 32;
     private const int MaxSceneGraphNodes = 500;
@@ -190,6 +190,21 @@ internal sealed class PipeBridgeServer : IDisposable
             "screenshot" => await CaptureScreenshotAsync(RequireParam(root, "path")),
             "execute_csharp" => await ExecuteCSharpAsync(RequireParam(root, "code")),
             "game_commands" => ListGameCommands(),
+            "find_actors" => await FindActorsAsync(
+                OptionalParam(root, "nameContains"), OptionalParam(root, "actorType"), OptionalParam(root, "scriptType"),
+                OptionalIntParam(root, "limit") ?? 50
+            ),
+            "get_member" => await GetMemberAsync(RequireParam(root, "actorId"), OptionalParam(root, "scriptType"), RequireParam(root, "member")),
+            "set_member" => await SetMemberAsync(
+                RequireParam(root, "actorId"), OptionalParam(root, "scriptType"), RequireParam(root, "member"), RequireValueParam(root, "value")
+            ),
+            "invoke_method" => await InvokeMethodAsync(
+                OptionalParam(root, "typeName"), RequireParam(root, "method"), OptionalParam(root, "actorId"),
+                OptionalParam(root, "scriptType"), RequireValueParam(root, "args")
+            ),
+            "add_script" => await AddScriptAsync(
+                RequireParam(root, "actorId"), RequireParam(root, "scriptType"), OptionalIntParam(root, "orderInParent")
+            ),
             "game_command" => await RunGameCommandAsync(RequireParam(root, "name"), OptionalParam(root, "args") ?? ""),
             _ => throw new InvalidOperationException($"Unknown method '{method}'"),
         };

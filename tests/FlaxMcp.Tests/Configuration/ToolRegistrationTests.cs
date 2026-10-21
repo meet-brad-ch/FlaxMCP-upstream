@@ -47,6 +47,8 @@ public sealed class ToolRegistrationTests
         Assert.Contains(tools, tool => tool.ProtocolTool.Name == "editor_play_mode");
         Assert.Contains(tools, tool => tool.ProtocolTool.Name == "editor_screenshot");
         Assert.DoesNotContain(tools, tool => tool.ProtocolTool.Name == "editor_execute_csharp");
+        Assert.DoesNotContain(tools, tool => tool.ProtocolTool.Name == "editor_invoke_method");
+        Assert.Contains(tools, tool => tool.ProtocolTool.Name == "editor_set_member");
     }
 
     [Fact]
@@ -73,6 +75,11 @@ public sealed class ToolRegistrationTests
         Assert.Contains("editor_events", names);
         Assert.Contains("editor_wait_for", names);
         Assert.Contains("game_commands", names);
+        Assert.Contains("editor_find_actors", names);
+        Assert.Contains("editor_get_member", names);
+        Assert.DoesNotContain("editor_set_member", names);
+        Assert.DoesNotContain("editor_add_script", names);
+        Assert.DoesNotContain("editor_invoke_method", names);
         Assert.DoesNotContain("game_command", names);
         Assert.Contains("logs_tail", names);
         Assert.Contains("logs_errors", names);
@@ -108,6 +115,7 @@ public sealed class ToolRegistrationTests
             .Select(tool => tool.ProtocolTool.Name);
 
         Assert.Contains("editor_execute_csharp", names);
+        Assert.Contains("editor_invoke_method", names);
     }
 
     [Fact]
