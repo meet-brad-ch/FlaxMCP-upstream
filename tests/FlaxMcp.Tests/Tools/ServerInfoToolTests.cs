@@ -183,7 +183,8 @@ public class ServerInfoToolTests
 
         public Task<FlaxEditorPlayModeResult> SetPlayModeAsync(
             string action,
-            CancellationToken cancellationToken = default)
+            CancellationToken cancellationToken = default,
+            IProgress<string>? progress = null)
         {
             throw new NotSupportedException();
         }
@@ -195,7 +196,7 @@ public class ServerInfoToolTests
             throw new NotSupportedException();
         }
 
-        public Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default)
+        public Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default, IProgress<string>? progress = null)
         {
             throw new NotSupportedException();
         }

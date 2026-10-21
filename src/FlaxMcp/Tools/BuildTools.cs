@@ -13,9 +13,9 @@ public sealed class BuildTools
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromMinutes(30);
 
     private readonly FlaxHeadlessEditorRunner _runner;
-    private readonly FlaxBuildJobManager _jobs;
+    private readonly FlaxJobManager _jobs;
 
-    public BuildTools(FlaxHeadlessEditorRunner runner, FlaxBuildJobManager jobs)
+    public BuildTools(FlaxHeadlessEditorRunner runner, FlaxJobManager jobs)
     {
         _runner = runner;
         _jobs = jobs;
@@ -47,26 +47,14 @@ public sealed class BuildTools
     }
 
     [McpServerTool(Name = "build_game", ReadOnly = false, UseStructuredContent = true)]
-    [Description("Starts a game build (-build <preset>.<target>, e.g. preset 'Development', target 'Windows') in the background and returns a job id immediately -- a real build can take minutes. Poll with build_status and fetch the outcome with build_result once it's done.")]
-    public string StartBuild(string preset, string target)
+    [Description("Starts a game build (-build <preset>.<target>, for example preset 'Development', target 'Windows') in the background and returns its job immediately. A real build can take minutes. Use job_status or job_wait to follow the build. The result of the job is the build outcome.")]
+    public FlaxJobHandle StartBuild(string preset, string target)
     {
-        return _jobs.Start(async cancellationToken =>
-            ToOperationResult(await _runner.RunAsync(["-build", $"{preset}.{target}"], BuildTimeout, cancellationToken))
-        );
-    }
-
-    [McpServerTool(Name = "build_status", ReadOnly = true, UseStructuredContent = true)]
-    [Description("Reports whether a build_game job is 'running', 'completed', 'failed', or 'canceled'.")]
-    public string GetBuildStatus(string jobId)
-    {
-        return _jobs.GetStatus(jobId);
-    }
-
-    [McpServerTool(Name = "build_result", ReadOnly = true, UseStructuredContent = true)]
-    [Description("Fetches a build_game job's outcome once build_status reports it's no longer running. Throws if the job is still running, unknown, or ended abnormally.")]
-    public FlaxBuildOperationResult GetBuildResult(string jobId)
-    {
-        return _jobs.GetResult(jobId);
+        return _jobs.Start("build_game", exclusive: false, async (progress, cancellationToken) =>
+        {
+            progress.Report($"building {preset}.{target}");
+            return ToOperationResult(await _runner.RunAsync(["-build", $"{preset}.{target}"], BuildTimeout, cancellationToken));
+        });
     }
 
     internal static FlaxBuildOperationResult ToOperationResult(FlaxHeadlessRunResult result)

@@ -85,13 +85,14 @@ public interface IFlaxBridgeClient
 
     Task<FlaxEditorPlayModeResult> SetPlayModeAsync(
         string action,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        IProgress<string>? progress = null);
 
     Task<FlaxBridgeScreenshot> CaptureScreenshotAsync(string path, CancellationToken cancellationToken = default);
 
     Task<FlaxCodeExecutionResult> ExecuteCSharpAsync(string code, CancellationToken cancellationToken = default);
 
-    Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default);
+    Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default, IProgress<string>? progress = null);
 
     Task<FlaxEditorOpenSceneResult> OpenSceneAsync(string path, CancellationToken cancellationToken = default);
 
@@ -401,9 +402,11 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
 
     public async Task<FlaxEditorPlayModeResult> SetPlayModeAsync(
         string action,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IProgress<string>? progress = null)
     {
-        var (isPlayMode, isPaused) = ExpectedPlayState(action);
+        var expected = ExpectedPlayState(action);
+        var watch = Stopwatch.StartNew();
         var state = await CallAsync<FlaxEditorPlayModeResult>(
             RequireHandshake(),
             "play_mode",
@@ -411,8 +414,9 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
             cancellationToken
         );
         var deadline = DateTime.UtcNow + PlayModeWait;
-        while (state.IsPlayMode != isPlayMode || state.IsPaused != isPaused)
+        while (state.IsPlayMode != expected.IsPlayMode || state.IsPaused != expected.IsPaused)
         {
+            progress?.Report($"waiting for the editor to {action.ToLowerInvariant()} play mode ({watch.Elapsed.TotalSeconds:0} s)");
             if (DateTime.UtcNow > deadline)
             {
                 throw new McpException(
@@ -428,19 +432,19 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
         return state with { RequestedAction = action.ToLowerInvariant() };
     }
 
-    private static (bool IsPlayMode, bool IsPaused) ExpectedPlayState(string action)
+    private static FlaxPlayState ExpectedPlayState(string action)
     {
         return action.ToLowerInvariant() switch
         {
-            "start" => (true, false),
-            "stop" => (false, false),
-            "pause" => (true, true),
-            "resume" => (true, false),
+            "start" => new FlaxPlayState(true, false),
+            "stop" => new FlaxPlayState(false, false),
+            "pause" => new FlaxPlayState(true, true),
+            "resume" => new FlaxPlayState(true, false),
             _ => throw new McpException("Play mode action must be start, stop, pause, or resume."),
         };
     }
 
-    public async Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default)
+    public async Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default, IProgress<string>? progress = null)
     {
         var watch = Stopwatch.StartNew();
         var logFile = FlaxLogReader.FindLatestLogFile(_projectFolder);
@@ -461,7 +465,8 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
             started = null;
         }
 
-        return await WaitForCompileAsync(started, logMark, watch, cancellationToken);
+        progress?.Report("compiling");
+        return await WaitForCompileAsync(started, logMark, watch, progress, cancellationToken);
     }
 
     /// <summary>
@@ -473,6 +478,7 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
         FlaxCompileStatus? started,
         int logMark,
         Stopwatch watch,
+        IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
         // A compile request interrupted by a reload: the reload is the first one.
@@ -494,6 +500,7 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient, IFlaxGameCommandClient
             if (loaded is not null && status.LoadedUtcTicks != loaded)
             {
                 reloads++;
+                progress?.Report($"reloaded {reloads}x, waiting for the editor to settle");
             }
 
             loaded = status.LoadedUtcTicks;
@@ -894,6 +901,9 @@ public sealed record FlaxEditorCompileResult(
     int Reloads);
 
 public sealed record FlaxEditorOpenSceneResult(int MainThreadId, string SceneId, string SceneName, IReadOnlyList<string> Scenes);
+
+/// <summary>A play mode state: in play mode, and paused.</summary>
+internal sealed record FlaxPlayState(bool IsPlayMode, bool IsPaused);
 
 public sealed record FlaxEditorPlayModeResult(
     int MainThreadId,

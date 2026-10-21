@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using FlaxMcp.Configuration;
 using FlaxMcp.Flax;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace FlaxMcp.Tools;
@@ -8,11 +9,34 @@ namespace FlaxMcp.Tools;
 [McpServerToolType]
 public sealed class EditorTools
 {
+    private static readonly TimeSpan PlayModeDeadline = TimeSpan.FromSeconds(35);
+    private static readonly TimeSpan CompileDeadline = TimeSpan.FromSeconds(125);
     private readonly IFlaxBridgeClient _bridgeClient;
+    private readonly FlaxJobManager _jobs;
 
-    public EditorTools(IFlaxBridgeClient bridgeClient)
+    public EditorTools(IFlaxBridgeClient bridgeClient, FlaxJobManager jobs)
     {
         _bridgeClient = bridgeClient;
+        _jobs = jobs;
+    }
+
+    /// <summary>Runs an editor operation as an exclusive job and waits for it up to its deadline.</summary>
+    private async Task<T> RunAsJobAsync<T>(
+        string kind,
+        Func<FlaxJobProgress, Task<T>> run,
+        TimeSpan deadline,
+        IProgress<ProgressNotificationValue>? progress,
+        CancellationToken cancellationToken) where T : class
+    {
+        var handle = _jobs.Start(kind, exclusive: true, async (jobProgress, _) => await run(jobProgress));
+        var state = await _jobs.WaitAsync(handle.JobId, deadline, progress, cancellationToken);
+        return state.Status switch
+        {
+            "succeeded" => (T)state.Result!,
+            "running" => throw new McpException(
+                $"{kind} is still running as {handle.JobId} after {deadline.TotalSeconds:0} s; wait for it with job_wait."),
+            _ => throw new McpException(state.Error ?? $"{kind} ended as {state.Status}."),
+        };
     }
 
     [McpServerTool(Name = "editor_scene_graph", ReadOnly = true, UseStructuredContent = true)]
@@ -261,9 +285,15 @@ public sealed class EditorTools
     )]
     public Task<FlaxEditorPlayModeResult> SetPlayModeAsync(
         [Description("Play mode action: start, stop, pause, or resume.")] string action,
-        CancellationToken cancellationToken)
+        IProgress<ProgressNotificationValue>? progress = null,
+        CancellationToken cancellationToken = default)
     {
-        return _bridgeClient.SetPlayModeAsync(action, cancellationToken);
+        return RunAsJobAsync(
+            "play_mode_" + action.ToLowerInvariant(),
+            jobProgress => _bridgeClient.SetPlayModeAsync(action, CancellationToken.None, jobProgress),
+            PlayModeDeadline,
+            progress,
+            cancellationToken);
     }
 
     [McpServerTool(Name = "editor_screenshot", UseStructuredContent = true)]
@@ -299,9 +329,16 @@ public sealed class EditorTools
         "The result is 'reloaded' (the scripts and this bridge reloaded), 'unchanged' (nothing to reload), or 'failed'. " +
         "A failed result contains the compiler errors and the build errors from the log (for example, a sharing violation)."
     )]
-    public Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken)
+    public Task<FlaxEditorCompileResult> CompileAsync(
+        IProgress<ProgressNotificationValue>? progress = null,
+        CancellationToken cancellationToken = default)
     {
-        return _bridgeClient.CompileAsync(cancellationToken);
+        return RunAsJobAsync(
+            "compile",
+            jobProgress => _bridgeClient.CompileAsync(CancellationToken.None, jobProgress),
+            CompileDeadline,
+            progress,
+            cancellationToken);
     }
 
     [McpServerTool(Name = "editor_open_scene", UseStructuredContent = true)]

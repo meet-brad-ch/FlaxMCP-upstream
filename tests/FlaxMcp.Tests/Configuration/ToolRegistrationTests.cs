@@ -67,8 +67,13 @@ public sealed class ToolRegistrationTests
         Assert.DoesNotContain("build_compile_scripts", names);
         Assert.DoesNotContain("build_clear_cache", names);
         Assert.DoesNotContain("build_game", names);
-        Assert.Contains("build_status", names);
-        Assert.Contains("build_result", names);
+        Assert.Contains("job_status", names);
+        Assert.Contains("job_wait", names);
+        Assert.DoesNotContain("editor_job_start", names);
+        Assert.Contains("editor_events", names);
+        Assert.Contains("editor_wait_for", names);
+        Assert.Contains("game_commands", names);
+        Assert.DoesNotContain("game_command", names);
         Assert.Contains("logs_tail", names);
         Assert.Contains("logs_errors", names);
         Assert.Contains("editor_get_selection", names);

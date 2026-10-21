@@ -27,7 +27,7 @@ builder.Services.AddSingleton<IFlaxBridgeClient>(services => services.GetRequire
 builder.Services.AddSingleton<IFlaxGameCommandClient>(services => services.GetRequiredService<FlaxBridgeClient>());
 builder.Services.AddSingleton<IFlaxEditorEventClient>(services => services.GetRequiredService<FlaxBridgeClient>());
 builder.Services.AddSingleton<FlaxHeadlessEditorRunner>();
-builder.Services.AddSingleton<FlaxBuildJobManager>();
+builder.Services.AddSingleton<FlaxJobManager>();
 builder.Services
        .AddOptions<FlaxMcpOptions>()
        .Configure(options => options.LoadFromEnvironment())
