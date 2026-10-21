@@ -23,6 +23,11 @@ internal static class HostBootstrap
 {
     private const string EntryTypeName = "FlaxMcpBridge.Host.BridgeHostEntry";
     private const string EventsTypeName = "FlaxMcpBridge.Host.Flax.BridgeHostFlaxEvents";
+    private const string SnippetCompilerTypeName = "FlaxMcpBridge.Host.Roslyn.SnippetCompiler";
+    private static MethodInfo? _compileSnippet;
+
+    /// <summary>The engine's Roslyn assemblies, which the host loads into the Default load context.</summary>
+    private static string RoslynFolder => Path.Combine(Globals.StartupFolder, "Binaries", "Tools");
     private const string AssemblyPrefix = "FlaxMcpBridgeHost-";
     private const string MarkerFile = "BridgeHostEntry.cs";
     private const double AttachWaitSeconds = 10;
@@ -54,6 +59,9 @@ internal static class HostBootstrap
 
         // The editor's events feed the host's ring from the first attach on (later calls do nothing).
         Invoke(entry.Assembly.GetType(EventsTypeName, throwOnError: true)!, "Start");
+        var snippetCompiler = entry.Assembly.GetType(SnippetCompilerTypeName, throwOnError: true)!;
+        Invoke(snippetCompiler, "Configure", RoslynFolder);
+        _compileSnippet = snippetCompiler.GetMethod("Compile", BindingFlags.Public | BindingFlags.Static)!;
         Invoke(entry, "Attach", JsonSerializer.Serialize(new Dictionary<string, object>
         {
             ["generation"] = generation,
@@ -61,6 +69,26 @@ internal static class HostBootstrap
             ["pluginVersion"] = typeof(HostBootstrap).Assembly.GetName().Version?.ToString() ?? "0.0.0",
             ["engineBuild"] = Globals.EngineBuildNumber,
         }), dispatch);
+    }
+
+    /// <summary>Compiles an editor_execute_csharp snippet in the host, whose compiler stays warm across reloads.</summary>
+    /// <param name="source">The whole compilation unit.</param>
+    /// <param name="referencePaths">The assemblies it may use, as files.</param>
+    /// <param name="cacheHit">Whether the host had the image already.</param>
+    /// <param name="milliseconds">The time the host spent.</param>
+    /// <param name="referenceCount">How many references the compile used.</param>
+    /// <returns>The compiled assembly.</returns>
+    /// <exception cref="InvalidOperationException">No host is attached, or the source does not compile.</exception>
+    public static byte[] CompileSnippet(
+        string source, string[] referencePaths, out bool cacheHit, out double milliseconds, out int referenceCount)
+    {
+        var compile = _compileSnippet ?? throw new InvalidOperationException("The bridge host is not attached.");
+        var arguments = new object?[] { source, referencePaths, null, null, null };
+        var image = (byte[])compile.Invoke(null, BindingFlags.DoNotWrapExceptions, null, arguments, null)!;
+        cacheHit = (bool)arguments[2]!;
+        milliseconds = (double)arguments[3]!;
+        referenceCount = (int)arguments[4]!;
+        return image;
     }
 
     /// <summary>Detaches a plugin generation from every running host (there is one).</summary>
@@ -135,7 +163,11 @@ internal static class HostBootstrap
             AssemblyPrefix + version,
             trees,
             // The engine's managed assembly is in the Default load context too: the host may use it.
-            platform.Where(IsManaged).Append(typeof(Debug).Assembly.Location).Select(path => MetadataReference.CreateFromFile(path)),
+            platform.Where(IsManaged)
+                .Append(typeof(Debug).Assembly.Location)
+                .Append(Path.Combine(RoslynFolder, "Microsoft.CodeAnalysis.dll"))
+                .Append(Path.Combine(RoslynFolder, "Microsoft.CodeAnalysis.CSharp.dll"))
+                .Select(path => MetadataReference.CreateFromFile(path)),
             new CSharpCompilationOptions(
                 OutputKind.DynamicallyLinkedLibrary,
                 optimizationLevel: OptimizationLevel.Release,

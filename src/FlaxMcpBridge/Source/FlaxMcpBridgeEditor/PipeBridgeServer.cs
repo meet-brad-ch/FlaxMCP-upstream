@@ -16,8 +16,6 @@ using FlaxEngine;
 using FlaxEditor.Content;
 using FlaxEditor.Surface;
 using FlaxEditor.Windows;
-using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp;
 
 namespace FlaxMcpBridge.Editor;
 
@@ -34,6 +32,8 @@ internal sealed class PipeBridgeServer : IDisposable
     private const double AssetLoadTimeoutMilliseconds = 3500;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
     private static readonly ConcurrentDictionary<int, MethodInfo> DynamicMethods = new();
+    // Built file of each in-memory assembly, by name and module version: found once per plugin generation.
+    private static readonly ConcurrentDictionary<string, string?> ReferencePaths = new(StringComparer.Ordinal);
     private static int _nextDynamicMethodId;
     private static volatile bool _detached;
 
@@ -1845,7 +1845,7 @@ internal sealed class PipeBridgeServer : IDisposable
 
     private static async Task<object> ExecuteCSharpAsync(string code)
     {
-        Task<(object Result, WeakReference LoadContext)>? executionTask = ExecuteInCollectibleContextAsync(code);
+        Task<SnippetExecution>? executionTask = ExecuteInCollectibleContextAsync(code);
         var execution = await executionTask;
         executionTask = null;
         await InvokeOnUpdateAsync(() => new object());
@@ -1860,7 +1860,35 @@ internal sealed class PipeBridgeServer : IDisposable
             throw new InvalidOperationException("The dynamic C# assembly could not be unloaded.");
         }
 
-        return execution.Result;
+        return new
+        {
+            mainThreadId = execution.Result.MainThreadId,
+            typeName = execution.Result.TypeName,
+            result = execution.Result.Result,
+            compileMilliseconds = execution.CompileMilliseconds,
+            cacheHit = execution.CacheHit,
+            referenceCount = execution.ReferenceCount,
+        };
+    }
+
+    /// <summary>A snippet's run: what it returned, its load context (to check the unload), and its compile.</summary>
+    private sealed record SnippetExecution(
+        SnippetResult Result,
+        WeakReference LoadContext,
+        bool CacheHit,
+        double CompileMilliseconds,
+        int ReferenceCount);
+
+    /// <summary>What a snippet returned, on which thread.</summary>
+    private sealed record SnippetResult(int MainThreadId, string? TypeName, JsonElement? Result);
+
+    private static string? CachedReferencePath(Assembly assembly)
+    {
+        if (!string.IsNullOrEmpty(assembly.Location))
+            return assembly.Location;
+        return ReferencePaths.GetOrAdd(
+            assembly.GetName().Name + "|" + assembly.ManifestModule.ModuleVersionId,
+            _ => ReferencePath(assembly));
     }
 
     private static string? ReferencePath(Assembly assembly)
@@ -1881,7 +1909,7 @@ internal sealed class PipeBridgeServer : IDisposable
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static async Task<(object Result, WeakReference LoadContext)> ExecuteInCollectibleContextAsync(string code)
+    private static async Task<SnippetExecution> ExecuteInCollectibleContextAsync(string code)
     {
         const string typeName = "FlaxMcpBridge.Dynamic.CodeExecution";
         var source = $$"""
@@ -1911,28 +1939,14 @@ internal sealed class PipeBridgeServer : IDisposable
         // The game's script assemblies are loaded from memory (no Location): they are referenced through their newest
         // built file, so a snippet can name a game type.
         var references = loadedAssemblies
-            .Select(ReferencePath)
+            .Select(CachedReferencePath)
             .OfType<string>()
             .Distinct(StringComparer.OrdinalIgnoreCase)
-            .Select(path => MetadataReference.CreateFromFile(path));
-        var compilation = CSharpCompilation.Create(
-            "FlaxMcpDynamic_" + Guid.NewGuid().ToString("N"),
-            [CSharpSyntaxTree.ParseText(source)],
-            references,
-            new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
-        );
-        using var assemblyStream = new MemoryStream();
-        var emitResult = compilation.Emit(assemblyStream);
-        if (!emitResult.Success)
-        {
-            var errors = emitResult.Diagnostics
-                .Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error)
-                .Select(diagnostic => diagnostic.ToString());
-            throw new InvalidOperationException("C# compilation failed: " + string.Join(Environment.NewLine, errors));
-        }
-
-        assemblyStream.Position = 0;
-        var loadContext = new AssemblyLoadContext(compilation.AssemblyName, isCollectible: true);
+            .ToArray();
+        // The host compiles: its compiler stays loaded across script reloads, and it keeps the images of recent snippets.
+        var image = HostBootstrap.CompileSnippet(source, references, out var cacheHit, out var compileMilliseconds, out var referenceCount);
+        using var assemblyStream = new MemoryStream(image);
+        var loadContext = new AssemblyLoadContext("FlaxMcpDynamic_" + Guid.NewGuid().ToString("N"), isCollectible: true);
         Func<AssemblyLoadContext, AssemblyName, Assembly?> resolver = (_, assemblyName) => loadedAssemblies.FirstOrDefault(
             assembly => AssemblyName.ReferenceMatchesDefinition(assembly.GetName(), assemblyName)
         );
@@ -1947,8 +1961,8 @@ internal sealed class PipeBridgeServer : IDisposable
             DynamicMethods[methodId] = method;
             try
             {
-                var result = await InvokeOnUpdateAsync(() => ExecuteDynamicMethod(methodId));
-                return (result, loadContextReference);
+                var result = (SnippetResult)await InvokeOnUpdateAsync(() => ExecuteDynamicMethod(methodId));
+                return new SnippetExecution(result, loadContextReference, cacheHit, compileMilliseconds, referenceCount);
             }
             finally
             {
@@ -1972,14 +1986,10 @@ internal sealed class PipeBridgeServer : IDisposable
         try
         {
             var result = method.Invoke(null, null);
-            return new
-            {
-                mainThreadId = checked((int)Globals.MainThreadID),
-                typeName = result?.GetType().FullName,
-                result = result is null ?
-                    (JsonElement?)null :
-                    SerializeDynamicResult(result),
-            };
+            return new SnippetResult(
+                checked((int)Globals.MainThreadID),
+                result?.GetType().FullName,
+                result is null ? null : SerializeDynamicResult(result));
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {

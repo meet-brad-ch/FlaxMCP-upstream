@@ -882,7 +882,13 @@ public sealed record FlaxGameCommandInfo(string Name, string Description, string
 
 public sealed record FlaxGameCommandResult(int MainThreadId, string Name, string? Result, double Milliseconds, bool IsPlayMode);
 
-public sealed record FlaxCodeExecutionResult(int MainThreadId, string? TypeName, JsonElement? Result);
+public sealed record FlaxCodeExecutionResult(
+    int MainThreadId,
+    string? TypeName,
+    JsonElement? Result,
+    double CompileMilliseconds = 0,
+    bool CacheHit = false,
+    int ReferenceCount = 0);
 
 public sealed record FlaxEditorSaveResult(int MainThreadId, bool Saved, int SavedScenes);
 
