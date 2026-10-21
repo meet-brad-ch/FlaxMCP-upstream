@@ -16,6 +16,11 @@ using FlaxEngine;
 using FlaxEditor.Content;
 using FlaxEditor.Surface;
 using FlaxEditor.Windows;
+#if USE_LARGE_WORLDS
+using Real = System.Double;
+#else
+using Real = System.Single;
+#endif
 
 namespace FlaxMcpBridge.Editor;
 
@@ -1373,10 +1378,11 @@ internal sealed partial class PipeBridgeServer : IDisposable
 
     private static Vector3 ReadVector3(JsonElement value)
     {
+        // read as double: Vector3's components are double in an engine built with large worlds
         return new Vector3(
-            value.GetProperty("x").GetSingle(),
-            value.GetProperty("y").GetSingle(),
-            value.GetProperty("z").GetSingle()
+            (Real)value.GetProperty("x").GetDouble(),
+            (Real)value.GetProperty("y").GetDouble(),
+            (Real)value.GetProperty("z").GetDouble()
         );
     }
 
@@ -1486,9 +1492,9 @@ internal sealed partial class PipeBridgeServer : IDisposable
         var scale = value.GetProperty("scale");
         return new Transform(
             new Vector3(
-                translation.GetProperty("x").GetSingle(),
-                translation.GetProperty("y").GetSingle(),
-                translation.GetProperty("z").GetSingle()
+                (Real)translation.GetProperty("x").GetDouble(),
+                (Real)translation.GetProperty("y").GetDouble(),
+                (Real)translation.GetProperty("z").GetDouble()
             ),
             new Quaternion(
                 orientation.GetProperty("x").GetSingle(),
