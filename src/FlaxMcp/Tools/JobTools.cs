@@ -12,11 +12,13 @@ public sealed class JobTools
     private static readonly TimeSpan MaxWait = TimeSpan.FromMinutes(30);
     private readonly FlaxJobManager _jobs;
     private readonly IFlaxBridgeClient _bridgeClient;
+    private readonly IFlaxScriptChecker _checker;
 
-    public JobTools(FlaxJobManager jobs, IFlaxBridgeClient bridgeClient)
+    public JobTools(FlaxJobManager jobs, IFlaxBridgeClient bridgeClient, IFlaxScriptChecker checker)
     {
         _jobs = jobs;
         _bridgeClient = bridgeClient;
+        _checker = checker;
     }
 
     [McpServerTool(Name = "editor_job_start", UseStructuredContent = true)]
@@ -39,7 +41,8 @@ public sealed class JobTools
 
         Func<FlaxJobProgress, CancellationToken, Task<object>> run = kind switch
         {
-            "compile" => async (progress, cancellationToken) => await _bridgeClient.CompileAsync(cancellationToken, progress),
+            "compile" => async (progress, cancellationToken) =>
+                await FlaxCheckedCompile.RunAsync(_checker, _bridgeClient, progress, cancellationToken),
             "play_start" or "play_stop" or "play_pause" or "play_resume" => async (progress, cancellationToken) =>
                 await _bridgeClient.SetPlayModeAsync(kind["play_".Length..], cancellationToken, progress),
             "open_scene" => async (progress, cancellationToken) =>

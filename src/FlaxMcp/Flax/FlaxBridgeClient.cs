@@ -980,7 +980,8 @@ public sealed record FlaxEditorCompileResult(
     double Seconds,
     IReadOnlyList<FlaxCompilerDiagnostic> Errors,
     IReadOnlyList<string> BuildErrors,
-    int Reloads);
+    int Reloads,
+    string? Check = null);
 
 public sealed record FlaxEditorOpenSceneResult(int MainThreadId, string SceneId, string SceneName, IReadOnlyList<string> Scenes);
 

@@ -15,7 +15,7 @@ public sealed class EditorToolsTests
             [new FlaxLiveSceneNode("scene-id", "FlaxEngine.Scene", "Main", [])],
             false
         );
-        var tool = new EditorTools(new StubBridgeClient(expected), new FlaxJobManager());
+        var tool = new EditorTools(new StubBridgeClient(expected), new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.GetSceneGraphAsync(TestContext.Current.CancellationToken);
 
@@ -31,7 +31,7 @@ public sealed class EditorToolsTests
         );
         var bridge = new StubBridgeClient();
         bridge.Selection = expected;
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.GetSelectionAsync(TestContext.Current.CancellationToken);
 
@@ -43,7 +43,7 @@ public sealed class EditorToolsTests
     {
         var expected = new FlaxEditorSelection(12, []);
         var bridge = new StubBridgeClient { Selection = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.SetSelectionAsync(["actor-id"], TestContext.Current.CancellationToken);
 
@@ -56,7 +56,7 @@ public sealed class EditorToolsTests
     {
         var expected = CreateActorDetails();
         var bridge = new StubBridgeClient { ActorDetails = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.GetActorDetailsAsync("actor-id", TestContext.Current.CancellationToken);
 
@@ -69,7 +69,7 @@ public sealed class EditorToolsTests
     {
         var expected = CreateActorDetails();
         var bridge = new StubBridgeClient { ActorDetails = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
         var translation = new FlaxVector3(10, 20, 30);
         var orientation = new FlaxQuaternion(0, 0, 0, 1);
         var scale = new FlaxVector3(1, 2, 3);
@@ -91,7 +91,7 @@ public sealed class EditorToolsTests
     public async Task CreateActorAsync_ForwardsCreationRequest()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
         var translation = new FlaxVector3(10, 20, 30);
         var orientation = new FlaxQuaternion(0, 0, 0, 1);
         var scale = new FlaxVector3(1, 2, 3);
@@ -111,7 +111,7 @@ public sealed class EditorToolsTests
     public async Task DuplicateActorAsync_ForwardsDuplicationRequest()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
         var translation = new FlaxVector3(10, 20, 30);
         var orientation = new FlaxQuaternion(0, 0, 0, 1);
         var scale = new FlaxVector3(1, 1, 1);
@@ -130,7 +130,7 @@ public sealed class EditorToolsTests
     public async Task RenameActorAsync_ForwardsRenameRequest()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.RenameActorAsync(
             "actor-id", "Wall", TestContext.Current.CancellationToken);
@@ -146,7 +146,7 @@ public sealed class EditorToolsTests
     public async Task ReparentActorAsync_ForwardsDestinationAndTransformPolicy(bool preserveWorldTransform)
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.ReparentActorAsync(
             "actor-id", null, "parent-id", preserveWorldTransform,
@@ -165,7 +165,7 @@ public sealed class EditorToolsTests
     public async Task DeleteActorAsync_ForwardsExplicitDescendantPolicy(bool deleteDescendants)
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.DeleteActorAsync(
             "actor-id", deleteDescendants, TestContext.Current.CancellationToken);
@@ -179,7 +179,7 @@ public sealed class EditorToolsTests
     public async Task GetStaticModelDetailsAsync_ForwardsActorId()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.GetStaticModelDetailsAsync(
             "actor-id", TestContext.Current.CancellationToken);
@@ -192,7 +192,7 @@ public sealed class EditorToolsTests
     public async Task SetStaticModelAsync_ForwardsTypedModelRequest()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.SetStaticModelAsync(
             "actor-id", "model-id", TestContext.Current.CancellationToken);
@@ -206,7 +206,7 @@ public sealed class EditorToolsTests
     public async Task SetStaticModelMaterialAsync_ForwardsTypedMaterialRequest()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.SetStaticModelMaterialAsync(
             "actor-id", 2, "material-id", TestContext.Current.CancellationToken);
@@ -221,7 +221,7 @@ public sealed class EditorToolsTests
     public async Task CreateBoxColliderAsync_ForwardsTypedProperties()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
         var size = new FlaxVector3(100, 20, 50);
         var center = new FlaxVector3(0, 10, 0);
 
@@ -240,7 +240,7 @@ public sealed class EditorToolsTests
     public async Task SetBoxColliderAsync_ForwardsTypedProperties()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
         var size = new FlaxVector3(80, 30, 40);
         var center = new FlaxVector3(1, 2, 3);
 
@@ -265,7 +265,7 @@ public sealed class EditorToolsTests
         bool invalidSize, double value)
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
         var size = new FlaxVector3(invalidSize ? value : 1, 1, 1);
         var center = new FlaxVector3(invalidSize ? 0 : value, 0, 0);
 
@@ -285,7 +285,7 @@ public sealed class EditorToolsTests
     {
         var expected = new KeyNotFoundException("Parent actor 'missing' is not loaded in the editor.");
         var bridge = new StubBridgeClient { CreateBoxColliderException = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var exception = await Assert.ThrowsAsync<KeyNotFoundException>(() => tool.CreateBoxColliderAsync(
             "missing", "Collision", new FlaxVector3(1, 1, 1), new FlaxVector3(0, 0, 0), false,
@@ -300,7 +300,7 @@ public sealed class EditorToolsTests
     {
         var expected = new FlaxEditorSaveResult(12, true, 1);
         var bridge = new StubBridgeClient { SaveResult = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.SaveAsync(TestContext.Current.CancellationToken);
 
@@ -312,7 +312,7 @@ public sealed class EditorToolsTests
     {
         var expected = new FlaxEditorPlayModeResult(12, "pause", true, true);
         var bridge = new StubBridgeClient { PlayModeResult = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.SetPlayModeAsync("pause", null, TestContext.Current.CancellationToken);
 
@@ -324,7 +324,7 @@ public sealed class EditorToolsTests
     public async Task CaptureScreenshotAsync_ForwardsResolvedPngPath()
     {
         var bridge = new StubBridgeClient();
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
         var path = Path.Combine(Path.GetTempPath(), "viewport.png");
 
         var result = await tool.CaptureScreenshotAsync(path, TestContext.Current.CancellationToken);
@@ -339,7 +339,7 @@ public sealed class EditorToolsTests
     [InlineData("viewport.jpg")]
     public async Task CaptureScreenshotAsync_WithInvalidPath_Throws(string path)
     {
-        var tool = new EditorTools(new StubBridgeClient(), new FlaxJobManager());
+        var tool = new EditorTools(new StubBridgeClient(), new FlaxJobManager(), new StubScriptChecker());
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
             tool.CaptureScreenshotAsync(path, TestContext.Current.CancellationToken));
@@ -348,7 +348,7 @@ public sealed class EditorToolsTests
     [Fact]
     public async Task CaptureScreenshotAsync_WithMissingDirectory_Throws()
     {
-        var tool = new EditorTools(new StubBridgeClient(), new FlaxJobManager());
+        var tool = new EditorTools(new StubBridgeClient(), new FlaxJobManager(), new StubScriptChecker());
         var path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "viewport.png");
 
         await Assert.ThrowsAsync<DirectoryNotFoundException>(() =>
@@ -360,18 +360,18 @@ public sealed class EditorToolsTests
     {
         var expected = new FlaxEditorCompileResult("reloaded", 1.2, [], [], 1);
         var bridge = new StubBridgeClient { CompileResult = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.CompileAsync(null, TestContext.Current.CancellationToken);
 
-        Assert.Same(expected, result);
+        Assert.Equal(expected with { Check = "passed", Seconds = expected.Seconds + 0.5 }, result);
     }
 
     [Fact]
     public async Task GetHostStatusAsync_ForwardsCollect()
     {
         var client = new StubBridgeClient();
-        var tool = new EditorTools(client, new FlaxJobManager());
+        var tool = new EditorTools(client, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.GetHostStatusAsync(true, TestContext.Current.CancellationToken);
 
@@ -384,7 +384,7 @@ public sealed class EditorToolsTests
     {
         var expected = new FlaxEditorOpenSceneResult(12, "abc", "Main", ["Main"]);
         var bridge = new StubBridgeClient { OpenSceneResult = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.OpenSceneAsync("Scenes/Main.scene", TestContext.Current.CancellationToken);
 
@@ -397,7 +397,7 @@ public sealed class EditorToolsTests
     {
         var expected = new FlaxCodeExecutionResult(12, "System.Int32", null);
         var bridge = new StubBridgeClient { CodeExecutionResult = expected };
-        var tool = new EditorTools(bridge, new FlaxJobManager());
+        var tool = new EditorTools(bridge, new FlaxJobManager(), new StubScriptChecker());
 
         var result = await tool.ExecuteCSharpAsync("return 42;", TestContext.Current.CancellationToken);
 
@@ -720,8 +720,11 @@ public sealed class EditorToolsTests
 
         public string? ScenePath { get; private set; }
 
+        public int CompileCalls { get; private set; }
+
         public Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default, IProgress<string>? progress = null)
         {
+            CompileCalls++;
             return Task.FromResult(CompileResult);
         }
 

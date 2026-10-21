@@ -29,6 +29,7 @@ builder.Services.AddSingleton<IFlaxEditorEventClient>(services => services.GetRe
 builder.Services.AddSingleton<IFlaxEditorObjectClient>(services => services.GetRequiredService<FlaxBridgeClient>());
 builder.Services.AddSingleton<FlaxHeadlessEditorRunner>();
 builder.Services.AddSingleton<FlaxJobManager>();
+builder.Services.AddSingleton<IFlaxScriptChecker, FlaxScriptChecker>();
 builder.Services
        .AddOptions<FlaxMcpOptions>()
        .Configure(options => options.LoadFromEnvironment())

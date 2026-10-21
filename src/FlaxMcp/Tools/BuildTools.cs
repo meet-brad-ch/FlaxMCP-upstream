@@ -14,11 +14,13 @@ public sealed class BuildTools
 
     private readonly FlaxHeadlessEditorRunner _runner;
     private readonly FlaxJobManager _jobs;
+    private readonly IFlaxScriptChecker _checker;
 
-    public BuildTools(FlaxHeadlessEditorRunner runner, FlaxJobManager jobs)
+    public BuildTools(FlaxHeadlessEditorRunner runner, FlaxJobManager jobs, IFlaxScriptChecker checker)
     {
         _runner = runner;
         _jobs = jobs;
+        _checker = checker;
     }
 
     [McpServerTool(Name = "build_generate_projects", ReadOnly = false, UseStructuredContent = true)]
@@ -44,6 +46,13 @@ public sealed class BuildTools
         List<string> arguments = alsoClearCooker ? ["-clearcache", "-clearcooker"] : ["-clearcache"];
         var result = await _runner.RunAsync(arguments, ShortOperationTimeout, cancellationToken);
         return ToOperationResult(result);
+    }
+
+    [McpServerTool(Name = "build_check_scripts", ReadOnly = true, UseStructuredContent = true)]
+    [Description("Compiles the script modules of the project, and of the projects that it references, outside the editor. It uses the compiler arguments that Flax.Build used last and the current files of the modules. It writes the output to a scratch folder. It returns passed, failed or unavailable. Unavailable means that the project has no build yet, and Reason gives the cause. The result contains structured errors and warnings (file, line, column, code) and the outcome of each module. The tool works while the editor is open, also during play mode. It does not change the project.")]
+    public Task<FlaxScriptCheckResult> CheckScriptsAsync(CancellationToken cancellationToken)
+    {
+        return _checker.CheckAsync(cancellationToken);
     }
 
     [McpServerTool(Name = "build_game", ReadOnly = false, UseStructuredContent = true)]
