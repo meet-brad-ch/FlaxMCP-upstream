@@ -1,11 +1,22 @@
 using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol;
 using ModelContextProtocol.Server;
 
 namespace FlaxMcp.Configuration;
 
 public static class ToolRegistration
 {
+    /// <summary>
+    /// The SDK's options, except that null properties are written: the output schema lists every record parameter
+    /// without a default as required, and a client that checks the schema rejects a result whose
+    /// null property was left out.
+    /// </summary>
+    internal static JsonSerializerOptions SerializerOptions { get; } =
+        new(McpJsonUtilities.DefaultOptions) { DefaultIgnoreCondition = JsonIgnoreCondition.Never };
+
     public static int AddTools(IServiceCollection services, FlaxMcpOptions options)
     {
         var registered = 0;
@@ -19,7 +30,7 @@ public static class ToolRegistration
                 services.AddSingleton<McpServerTool>(serviceProvider => McpServerTool.Create(
                         capturedMethod,
                         _ => ActivatorUtilities.CreateInstance(serviceProvider, capturedType),
-                        new McpServerToolCreateOptions { Services = serviceProvider }
+                        new McpServerToolCreateOptions { Services = serviceProvider, SerializerOptions = SerializerOptions }
                     )
                 );
                 registered++;

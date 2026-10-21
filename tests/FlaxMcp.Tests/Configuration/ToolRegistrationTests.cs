@@ -145,4 +145,15 @@ public sealed class ToolRegistrationTests
         var projectInfo = Assert.Single(tools, tool => tool.ProtocolTool.Name == "project_info");
         Assert.NotNull(projectInfo.ProtocolTool.OutputSchema);
     }
+    [Fact]
+    public void SerializerOptions_WriteNullProperties_TheOutputSchemaRequires()
+    {
+        var status = new FlaxMcp.Flax.FlaxBridgeHostStatus("v", DateTime.UnixEpoch, null, false, true, null, 0, 0, 0, 0, false, 0, 0, 0, 0, 0);
+
+        var json = System.Text.Json.JsonSerializer.Serialize(status, ToolRegistration.SerializerOptions);
+
+        Assert.Contains("\"acceptLoopFault\":null", json);
+        Assert.Contains("\"generation\":null", json);
+    }
+
 }
