@@ -94,11 +94,22 @@ public interface IFlaxBridgeClient
     Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default);
 
     Task<FlaxEditorOpenSceneResult> OpenSceneAsync(string path, CancellationToken cancellationToken = default);
+
+    Task<FlaxBridgeHostStatus> GetHostStatusAsync(bool collect, CancellationToken cancellationToken = default);
 }
 
 public sealed class FlaxBridgeClient : IFlaxBridgeClient
 {
-    internal const int CurrentProtocolVersion = 15;
+    internal const int CurrentProtocolVersion = 16;
+    internal const string InterruptedByReload = "interrupted_by_reload";
+    internal const string PluginNotAttached = "plugin_not_attached";
+
+    // Requests that only read: one interrupted by a script reload is sent again to the reloaded plugin.
+    private static readonly HashSet<string> QueryMethods =
+    [
+        "ping", "scene_graph", "get_selection", "actor_details", "static_model_details", "material_details",
+        "box_collider_details", "play_mode_state", "compile_status", "host_status",
+    ];
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan PlayModeWait = TimeSpan.FromSeconds(30);
@@ -140,6 +151,14 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
                 return FlaxBridgeStatus.Disconnected;
             }
 
+            if (!IsRunning(handshake.Pid))
+            {
+                return FlaxBridgeStatus.Disconnected with
+                {
+                    Error = $"The Flax Editor that opened the bridge session (process {handshake.Pid}) is not running.",
+                };
+            }
+
             ValidateProtocol(handshake);
             await PingAsync(handshake, cancellationToken);
         }
@@ -172,7 +191,9 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
             handshake.PluginVersion,
             handshake.EngineBuild,
             handshake.StartedUtc,
-            null
+            null,
+            handshake.HostVersion,
+            handshake.Generation
         );
     }
 
@@ -406,7 +427,15 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
             await SetPlayModeAsync("stop", cancellationToken);
         }
 
-        var started = await CallAsync<FlaxCompileStatus>(RequireHandshake(), "compile", null, cancellationToken);
+        FlaxCompileStatus started;
+        try
+        {
+            started = await CallAsync<FlaxCompileStatus>(RequireHandshake(), "compile", null, cancellationToken);
+        }
+        catch (FlaxBridgeRequestException ex) when (ex.Code == InterruptedByReload)
+        {
+            return new FlaxEditorCompileResult("reloaded", watch.Elapsed.TotalSeconds, [], []);
+        }
         var deadline = DateTime.UtcNow + CompileWait;
         while (DateTime.UtcNow < deadline)
         {
@@ -460,6 +489,11 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
         return CallAsync<FlaxEditorOpenSceneResult>(RequireHandshake(), "open_scene", new { path }, cancellationToken);
     }
 
+    public Task<FlaxBridgeHostStatus> GetHostStatusAsync(bool collect, CancellationToken cancellationToken = default)
+    {
+        return CallAsync<FlaxBridgeHostStatus>(RequireHandshake(), "host_status", new { collect }, cancellationToken);
+    }
+
     private async Task<T?> TryCallAsync<T>(string method, CancellationToken cancellationToken) where T : class
     {
         var handshake = ReadHandshake();
@@ -476,7 +510,7 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
         {
             return null;
         }
-        catch (FlaxBridgeRequestException ex) when (ex.Code == "request_timeout")
+        catch (FlaxBridgeRequestException ex) when (ex.Code is "request_timeout" or InterruptedByReload or PluginNotAttached)
         {
             return null;
         }
@@ -505,6 +539,23 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
     }
 
     private async Task<T> CallAsync<T>(
+        FlaxBridgeHandshake handshake,
+        string method,
+        object? parameters,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await SendAsync<T>(handshake, method, parameters, cancellationToken);
+        }
+        catch (FlaxBridgeRequestException ex) when (ex.Code == InterruptedByReload && QueryMethods.Contains(method))
+        {
+            // The bridge host waits for the reloaded plugin before it answers the second request.
+            return await SendAsync<T>(RequireHandshake(), method, parameters, cancellationToken);
+        }
+    }
+
+    private async Task<T> SendAsync<T>(
         FlaxBridgeHandshake handshake,
         string method,
         object? parameters,
@@ -582,10 +633,32 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
 
     private FlaxBridgeHandshake RequireHandshake()
     {
-        return ReadHandshake() ??
+        var handshake = ReadHandshake() ??
             throw new McpException(
                 "No Flax Editor bridge session is available for the configured project."
             );
+        if (!IsRunning(handshake.Pid))
+        {
+            throw new McpException(
+                $"The Flax Editor that opened the bridge session (process {handshake.Pid}) is not running."
+            );
+        }
+
+        return handshake;
+    }
+
+    private static bool IsRunning(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            // GetProcessById's answer for a process id that is not running.
+            return false;
+        }
     }
 
     private static void ValidateProtocol(FlaxBridgeHandshake handshake)
@@ -623,9 +696,12 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
     private sealed record FlaxBridgeHandshake(
         string PipeName,
         int ProtocolVersion,
+        int Pid,
         string PluginVersion,
         int EngineBuild,
-        DateTime StartedUtc);
+        DateTime StartedUtc,
+        string? HostVersion,
+        long? Generation);
 }
 
 public sealed record FlaxBridgeStatus(
@@ -633,7 +709,9 @@ public sealed record FlaxBridgeStatus(
     string? PluginVersion,
     int? EngineBuild,
     DateTime? StartedUtc,
-    string? Error = null)
+    string? Error = null,
+    string? HostVersion = null,
+    long? Generation = null)
 {
     public static FlaxBridgeStatus Disconnected { get; } = new(
         false,
@@ -645,6 +723,24 @@ public sealed record FlaxBridgeStatus(
 }
 
 public sealed record FlaxBridgePing(bool Pong, DateTime UtcNow);
+
+public sealed record FlaxBridgeHostStatus(
+    string HostVersion,
+    DateTime HostStartedUtc,
+    long? Generation,
+    bool Attached,
+    bool Accepting,
+    string? AcceptLoopFault,
+    int AttachCount,
+    int DetachCount,
+    int PluginContextsAlive,
+    int PluginContextsSeen,
+    bool Collected,
+    long PrivateBytes,
+    long ManagedBytes,
+    int Gen0Collections,
+    int Gen1Collections,
+    int Gen2Collections);
 
 public sealed class FlaxBridgeRequestException(string code, string message)
     : McpException($"Flax Editor bridge error [{code}]: {message}")

@@ -204,5 +204,10 @@ public class ServerInfoToolTests
         {
             throw new NotSupportedException();
         }
+
+        public Task<FlaxBridgeHostStatus> GetHostStatusAsync(bool collect, CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
     }
 }

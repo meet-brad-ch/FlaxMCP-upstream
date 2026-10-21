@@ -5,8 +5,8 @@ using FlaxEngine;
 namespace FlaxMcpBridge.Editor;
 
 /// <summary>
-/// Spike editor plugin for FlaxMCP: hosts a local named-pipe bridge so an external MCP server
-/// process can query and drive a running Flax Editor session.
+/// Editor plugin for FlaxMCP: attaches this plugin generation's request handler to the bridge host, the named-pipe
+/// server that outlives script reloads, so an external MCP server process can query and drive the editor.
 /// </summary>
 /// <seealso cref="FlaxEditor.EditorPlugin" />
 public class BridgeEditorPlugin : EditorPlugin
@@ -23,22 +23,33 @@ public class BridgeEditorPlugin : EditorPlugin
 
         try
         {
-            _server = new PipeBridgeServer(Globals.ProjectFolder);
-            _server.Start();
-            Debug.Log($"[FlaxMcpBridge] Pipe server started: {_server.PipeName}");
+            _server = new PipeBridgeServer();
+            HostBootstrap.Attach(PipeBridgeServer.Generation, PipeBridgeServer.Protocol, _server.HandleRequestAsync);
+            Scripting.Exit += OnExit;
+            Debug.Log($"[FlaxMcpBridge] Attached to the bridge host (generation {PipeBridgeServer.Generation}).");
         }
         catch (Exception ex)
         {
-            Debug.LogError($"[FlaxMcpBridge] Failed to start pipe server: {ex}");
+            Debug.LogError($"[FlaxMcpBridge] Failed to attach to the bridge host: {ex}");
         }
     }
 
     /// <inheritdoc />
     public override void Deinitialize()
     {
-        _server?.Dispose();
-        _server = null;
+        Scripting.Exit -= OnExit;
+        if (_server is not null)
+        {
+            HostBootstrap.Detach(PipeBridgeServer.Generation);
+            _server.Dispose();
+            _server = null;
+        }
 
         base.Deinitialize();
+    }
+
+    private static void OnExit()
+    {
+        HostBootstrap.Shutdown();
     }
 }

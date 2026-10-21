@@ -705,6 +705,118 @@ public sealed class FlaxBridgeClientTests : IDisposable
         Assert.Contains(result.BuildErrors, line => line.Contains("Failed to run build tool"));
     }
 
+    [Fact]
+    public async Task Query_InterruptedByAReload_IsSentAgain()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var serverTask = ServeSequenceAsync(
+            pipeName,
+            cancellationToken,
+            ("get_selection", "{\"id\":1,\"error\":{\"code\":\"interrupted_by_reload\",\"message\":\"reloaded\"}}"),
+            ("get_selection", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"selected\":[]}}")
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var selection = await client.GetSelectionAsync(cancellationToken);
+        await serverTask;
+
+        Assert.Equal(7, selection.MainThreadId);
+    }
+
+    [Fact]
+    public async Task Command_InterruptedByAReload_IsNotSentAgain()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var serverTask = ServeSequenceAsync(
+            pipeName,
+            cancellationToken,
+            ("execute_csharp", "{\"id\":1,\"error\":{\"code\":\"interrupted_by_reload\",\"message\":\"effects unknown\"}}")
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var exception = await Assert.ThrowsAsync<FlaxBridgeRequestException>(() =>
+            client.ExecuteCSharpAsync("return 1;", cancellationToken));
+        await serverTask;
+
+        Assert.Equal("interrupted_by_reload", exception.Code);
+        Assert.Contains("effects unknown", exception.Message);
+    }
+
+    [Fact]
+    public async Task CompileAsync_WhenPollingMeetsTheReload_ReportsReloaded()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var serverTask = ServeSequenceAsync(
+            pipeName,
+            cancellationToken,
+            ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
+            ("compile", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
+            ("compile_status", "{\"id\":1,\"error\":{\"code\":\"plugin_not_attached\",\"message\":\"reloading\"}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}")
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var result = await client.CompileAsync(cancellationToken);
+        await serverTask;
+
+        Assert.Equal("reloaded", result.Outcome);
+    }
+
+    [Fact]
+    public async Task PingAsync_WhenTheEditorProcessIsGone_SaysSo()
+    {
+        WriteHandshake("FlaxMcpTests-" + Guid.NewGuid().ToString("N"), DateTime.UtcNow, pid: int.MaxValue);
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var exception = await Assert.ThrowsAsync<McpException>(() => client.PingAsync(TestContext.Current.CancellationToken));
+
+        Assert.Contains("is not running", exception.Message);
+    }
+
+    [Fact]
+    public async Task GetStatusAsync_WhenTheEditorProcessIsGone_ReportsDisconnectedWithTheReason()
+    {
+        WriteHandshake("FlaxMcpTests-" + Guid.NewGuid().ToString("N"), DateTime.UtcNow, pid: int.MaxValue);
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var status = await client.GetStatusAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(status.Connected);
+        Assert.Contains("is not running", status.Error);
+    }
+
+    [Fact]
+    public async Task GetHostStatusAsync_SendsCollect()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var serverTask = ServeResponseAsync(
+            pipeName,
+            "{\"id\":1,\"result\":{\"hostVersion\":\"abc\",\"hostStartedUtc\":\"2026-10-14T10:00:00Z\",\"generation\":5," +
+            "\"attached\":true,\"accepting\":true,\"acceptLoopFault\":null,\"attachCount\":3,\"detachCount\":2," +
+            "\"pluginContextsAlive\":1,\"pluginContextsSeen\":3,\"collected\":true,\"privateBytes\":10,\"managedBytes\":5," +
+            "\"gen0Collections\":1,\"gen1Collections\":1,\"gen2Collections\":1}}",
+            cancellationToken,
+            "host_status",
+            "\"collect\":true"
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var status = await client.GetHostStatusAsync(true, cancellationToken);
+        await serverTask;
+
+        Assert.Equal("abc", status.HostVersion);
+        Assert.Equal(3, status.AttachCount);
+        Assert.Equal(1, status.PluginContextsAlive);
+    }
+
     private static async Task ServeSequenceAsync(
         string pipeName,
         CancellationToken cancellationToken,
@@ -812,7 +924,7 @@ public sealed class FlaxBridgeClientTests : IDisposable
     }
 
     private void WriteHandshake(string pipeName, DateTime startedUtc,
-        int protocolVersion = FlaxBridgeClient.CurrentProtocolVersion)
+        int protocolVersion = FlaxBridgeClient.CurrentProtocolVersion, int? pid = null)
     {
         var handshakePath = Path.Combine(_tempDir, ProjectHash(_projectFolder) + ".json");
         File.WriteAllText(
@@ -822,6 +934,7 @@ public sealed class FlaxBridgeClientTests : IDisposable
                 {
                     pipeName,
                     protocolVersion,
+                    pid = pid ?? Environment.ProcessId,
                     pluginVersion = "1.2.3",
                     engineBuild = 12000,
                     startedUtc,

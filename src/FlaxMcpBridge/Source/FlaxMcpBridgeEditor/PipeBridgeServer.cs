@@ -4,12 +4,10 @@ using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Pipes;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.Loader;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -24,12 +22,12 @@ using Microsoft.CodeAnalysis.CSharp;
 namespace FlaxMcpBridge.Editor;
 
 /// <summary>
-/// Named-pipe bridge transport accepting one client connection at a time and exchanging
-/// newline-delimited JSON messages.
+/// Answers bridge requests for one plugin generation. The pipe belongs to the bridge host (Host/), which outlives
+/// script reloads; this class is what each reloaded plugin attaches to it.
 /// </summary>
 internal sealed class PipeBridgeServer : IDisposable
 {
-    private const int ProtocolVersion = 15;
+    private const int ProtocolVersion = 16;
     private static readonly long LoadedUtcTicks = DateTime.UtcNow.Ticks;
     private const int MaxSceneGraphDepth = 32;
     private const int MaxSceneGraphNodes = 500;
@@ -37,103 +35,55 @@ internal sealed class PipeBridgeServer : IDisposable
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
     private static readonly ConcurrentDictionary<int, MethodInfo> DynamicMethods = new();
     private static int _nextDynamicMethodId;
-    private readonly string _projectFolder;
-    private readonly CancellationTokenSource _cts = new();
-    private Task? _acceptLoop;
-    private NamedPipeServerStream? _currentPipe;
-    private string? _handshakePath;
+    private static volatile bool _detached;
 
-    public string PipeName { get; }
+    /// <summary>This plugin generation: its load time in UTC ticks.</summary>
+    public static long Generation => LoadedUtcTicks;
 
-    public PipeBridgeServer(string projectFolder)
+    /// <summary>The bridge protocol this plugin speaks.</summary>
+    public static int Protocol => ProtocolVersion;
+
+    /// <summary>Answers one request line within the request timeout; failures become error responses.</summary>
+    /// <param name="line">The request JSON.</param>
+    /// <returns>The response JSON.</returns>
+    public async Task<string> HandleRequestAsync(string line)
     {
-        _projectFolder = projectFolder;
-        PipeName = "FlaxMcp-" + Hash(projectFolder);
-    }
-
-    public void Start()
-    {
-        WriteHandshakeFile();
-        _acceptLoop = AcceptLoopAsync(_cts.Token);
-    }
-
-    private async Task AcceptLoopAsync(CancellationToken token)
-    {
-        while (!token.IsCancellationRequested)
+        try
         {
-            NamedPipeServerStream? pipe = null;
-            try
+            var dispatch = DispatchAsync(line);
+            var finished = await Task.WhenAny(dispatch, Task.Delay(RequestTimeout));
+            if (finished != dispatch)
             {
-                pipe = new NamedPipeServerStream(PipeName, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous);
-                _currentPipe = pipe;
-                await pipe.WaitForConnectionAsync(token);
-                await HandleClientAsync(pipe, token);
+                ObserveFault(dispatch);
+                return SerializeError(
+                    ReadRequestId(line),
+                    "request_timeout",
+                    $"The editor action did not complete within {RequestTimeout.TotalSeconds:0} seconds."
+                );
             }
-            catch (OperationCanceledException)
-            {
-                // Shutting down.
-            }
-            catch (ObjectDisposedException) when (token.IsCancellationRequested)
-            {
-                // Shutting down while waiting for a client or reading a request.
-            }
-            catch (IOException)
-            {
-                // Client disconnected mid-message; loop and accept the next connection.
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[FlaxMcpBridge] Pipe connection error: {ex}");
-            }
-            finally
-            {
-                pipe?.Dispose();
-                _currentPipe = null;
-            }
+
+            return await dispatch;
+        }
+        catch (Exception ex)
+        {
+            return SerializeError(ReadRequestId(line), "request_failed", ex.Message);
         }
     }
 
-    private static async Task HandleClientAsync(NamedPipeServerStream pipe, CancellationToken token)
+    /// <summary>
+    /// Queues work for the main thread unless this plugin generation has detached: the engine keeps its queue across
+    /// a script reload, and work queued by the old generation must not act on the reloaded editor.
+    /// </summary>
+    /// <param name="action">The work.</param>
+    private static void OnMainThread(Action action)
     {
-        using var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, leaveOpen: true);
-        await using var writer = new StreamWriter(pipe, new UTF8Encoding(false), 4096, leaveOpen: true) { AutoFlush = false, NewLine = "\n" };
-
-        while (pipe.IsConnected && !token.IsCancellationRequested)
+        Scripting.InvokeOnUpdate(() =>
         {
-            var line = await reader.ReadLineAsync(token);
-            if (line is null)
-                break;
-
-            string responseJson;
-            try
+            if (!_detached)
             {
-                var dispatchTask = DispatchAsync(line);
-                if (!dispatchTask.Wait(RequestTimeout))
-                {
-                    ObserveFault(dispatchTask);
-                    responseJson = SerializeError(
-                        ReadRequestId(line),
-                        "request_timeout",
-                        $"The editor action did not complete within {RequestTimeout.TotalSeconds:0} seconds."
-                    );
-                }
-                else
-                {
-                    responseJson = dispatchTask.GetAwaiter().GetResult();
-                }
+                action();
             }
-            catch (AggregateException ex) when (ex.InnerExceptions.Count == 1)
-            {
-                responseJson = SerializeError(ReadRequestId(line), "request_failed", ex.InnerException!.Message);
-            }
-            catch (Exception ex)
-            {
-                responseJson = SerializeError(ReadRequestId(line), "request_failed", ex.Message);
-            }
-
-            await writer.WriteLineAsync(responseJson);
-            await writer.FlushAsync(token);
-        }
+        });
     }
 
     private static async Task<string> DispatchAsync(string requestJson)
@@ -388,7 +338,7 @@ internal sealed class PipeBridgeServer : IDisposable
     private static Task<object> GetSceneGraphAsync()
     {
         var tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Scripting.InvokeOnUpdate(() =>
+        OnMainThread(() =>
         {
             try
             {
@@ -1582,7 +1532,7 @@ internal sealed class PipeBridgeServer : IDisposable
     private static Task<object> InvokeOnUpdateAsync(Func<object> action)
     {
         var tcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Scripting.InvokeOnUpdate(() =>
+        OnMainThread(() =>
         {
             try
             {
@@ -1745,7 +1695,7 @@ internal sealed class PipeBridgeServer : IDisposable
         // The request is queued, not awaited: starting play loads the scene on the main thread, which can take longer
         // than one request may wait; the server polls play_mode_state until the state is reached.
         var state = await ReadPlayModeStateAsync();
-        Scripting.InvokeOnUpdate(() =>
+        OnMainThread(() =>
         {
             var editor = FlaxEditor.Editor.Instance;
             switch (normalizedAction)
@@ -1776,7 +1726,7 @@ internal sealed class PipeBridgeServer : IDisposable
     private static Task<PlayModeState> ReadPlayModeStateAsync()
     {
         var tcs = new TaskCompletionSource<PlayModeState>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Scripting.InvokeOnUpdate(() =>
+        OnMainThread(() =>
         {
             var editor = FlaxEditor.Editor.Instance;
             var playingState = editor.StateMachine.CurrentState as FlaxEditor.States.PlayingState;
@@ -1792,7 +1742,7 @@ internal sealed class PipeBridgeServer : IDisposable
     private static async Task<object> CaptureScreenshotAsync(string path)
     {
         var captureQueued = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
-        Scripting.InvokeOnUpdate(() =>
+        OnMainThread(() =>
         {
             try
             {
@@ -2052,67 +2002,9 @@ internal sealed class PipeBridgeServer : IDisposable
         }
     }
 
-    private void WriteHandshakeFile()
-    {
-        var sessionsDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "FlaxMcp", "sessions");
-        Directory.CreateDirectory(sessionsDir);
-        _handshakePath = Path.Combine(sessionsDir, Hash(_projectFolder) + ".json");
-
-        var handshake = new Dictionary<string, object?>
-        {
-            ["pipeName"] = PipeName,
-            ["protocolVersion"] = ProtocolVersion,
-            ["pid"] = Environment.ProcessId,
-            ["projectFolder"] = _projectFolder,
-            ["pluginVersion"] = typeof(PipeBridgeServer).Assembly.GetName().Version?.ToString() ?? "0.0.0",
-            ["engineBuild"] = Globals.EngineBuildNumber,
-            ["startedUtc"] = DateTime.UtcNow,
-        };
-        File.WriteAllText(_handshakePath, JsonSerializer.Serialize(handshake));
-    }
-
-    private static string Hash(string value)
-    {
-        var normalized = value.Replace('\\', '/').TrimEnd('/').ToLowerInvariant();
-        var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(normalized));
-        return Convert.ToHexString(bytes)[..16];
-    }
-
+    /// <summary>Marks this generation detached: work it queued for the main thread is skipped.</summary>
     public void Dispose()
     {
-        var acceptLoopReference = StopAcceptLoop();
-        _cts.Dispose();
-        for (var attempt = 0; acceptLoopReference?.IsAlive == true && attempt < 10; attempt++)
-        {
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-        }
-
-        if (_handshakePath is not null && File.Exists(_handshakePath))
-        {
-            try { File.Delete(_handshakePath); }
-            catch (IOException) { /* best-effort cleanup */ }
-        }
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private WeakReference? StopAcceptLoop()
-    {
-        _cts.Cancel();
-        _currentPipe?.Dispose();
-
-        var acceptLoop = _acceptLoop;
-        _acceptLoop = null;
-        _currentPipe = null;
-        try
-        {
-            acceptLoop?.GetAwaiter().GetResult();
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected: cancellation unwinds through the accept loop.
-        }
-
-        return acceptLoop is null ? null : new WeakReference(acceptLoop);
+        _detached = true;
     }
 }

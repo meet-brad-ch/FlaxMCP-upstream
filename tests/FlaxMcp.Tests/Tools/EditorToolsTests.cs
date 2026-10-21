@@ -368,6 +368,18 @@ public sealed class EditorToolsTests
     }
 
     [Fact]
+    public async Task GetHostStatusAsync_ForwardsCollect()
+    {
+        var client = new StubBridgeClient();
+        var tool = new EditorTools(client);
+
+        var result = await tool.GetHostStatusAsync(true, TestContext.Current.CancellationToken);
+
+        Assert.Same(client.HostStatus, result);
+        Assert.True(client.HostStatusCollect);
+    }
+
+    [Fact]
     public async Task OpenSceneAsync_ForwardsPath()
     {
         var expected = new FlaxEditorOpenSceneResult(12, "abc", "Main", ["Main"]);
@@ -716,6 +728,17 @@ public sealed class EditorToolsTests
         {
             ScenePath = path;
             return Task.FromResult(OpenSceneResult);
+        }
+
+        public FlaxBridgeHostStatus HostStatus { get; set; } =
+            new("v", DateTime.UnixEpoch, 1, true, true, null, 1, 0, 1, 1, false, 0, 0, 0, 0, 0);
+
+        public bool? HostStatusCollect { get; private set; }
+
+        public Task<FlaxBridgeHostStatus> GetHostStatusAsync(bool collect, CancellationToken cancellationToken = default)
+        {
+            HostStatusCollect = collect;
+            return Task.FromResult(HostStatus);
         }
     }
 }
