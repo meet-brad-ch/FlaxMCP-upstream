@@ -710,11 +710,30 @@ public sealed class FlaxBridgeClientTests : IDisposable
         CancellationToken cancellationToken,
         params (string Method, string Response)[] steps)
     {
-        foreach (var (method, response) in steps)
+        // The next instance is created before the current one closes: on Unix a pipe is a socket whose listener
+        // goes away with its last instance, and a client reconnecting at once would be reset.
+        var pipe = CreateSequencePipe(pipeName);
+        for (var i = 0; i < steps.Length; i++)
         {
-            await ServeResponseAsync(pipeName, response, cancellationToken, method);
+            await pipe.WaitForConnectionAsync(cancellationToken);
+            var next = i + 1 < steps.Length ? CreateSequencePipe(pipeName) : null;
+            await using (pipe)
+            {
+                await AnswerAsync(pipe, steps[i].Method, steps[i].Response, null, cancellationToken);
+            }
+
+            pipe = next!;
         }
     }
+
+    private static NamedPipeServerStream CreateSequencePipe(string pipeName) =>
+        new(
+            pipeName,
+            PipeDirection.InOut,
+            NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte,
+            PipeOptions.Asynchronous
+        );
 
     private async Task ServePingAsync(string pipeName, CancellationToken cancellationToken)
     {
@@ -740,6 +759,16 @@ public sealed class FlaxBridgeClientTests : IDisposable
             PipeOptions.Asynchronous
         );
         await pipe.WaitForConnectionAsync(cancellationToken);
+        await AnswerAsync(pipe, method, response, expectedRequestText, cancellationToken);
+    }
+
+    private static async Task AnswerAsync(
+        NamedPipeServerStream pipe,
+        string method,
+        string response,
+        string? expectedRequestText,
+        CancellationToken cancellationToken)
+    {
         using var reader = new StreamReader(
             pipe,
             Encoding.UTF8,
