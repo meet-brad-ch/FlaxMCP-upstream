@@ -194,5 +194,15 @@ public class ServerInfoToolTests
         {
             throw new NotSupportedException();
         }
+
+        public Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task<FlaxEditorOpenSceneResult> OpenSceneAsync(string path, CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException();
+        }
     }
 }

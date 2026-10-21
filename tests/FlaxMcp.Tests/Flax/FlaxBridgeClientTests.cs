@@ -154,11 +154,12 @@ public sealed class FlaxBridgeClientTests : IDisposable
         var client = new FlaxBridgeClient(_projectFolder, _tempDir);
 
         var exception =
-            await Assert.ThrowsAsync<InvalidOperationException>(()
+            await Assert.ThrowsAsync<FlaxBridgeRequestException>(()
                 => client.PingAsync(TestContext.Current.CancellationToken)
             );
         await serverTask;
 
+        Assert.Equal("action_failed", exception.Code);
         Assert.Contains("[action_failed]: Editor action failed", exception.Message);
     }
 
@@ -556,7 +557,7 @@ public sealed class FlaxBridgeClientTests : IDisposable
         WriteHandshake(pipeName, DateTime.UtcNow);
         var serverTask = ServeResponseAsync(
             pipeName,
-            "{\"id\":1,\"result\":{\"mainThreadId\":7,\"saved\":true}}",
+            "{\"id\":1,\"result\":{\"mainThreadId\":7,\"saved\":true,\"savedScenes\":2}}",
             TestContext.Current.CancellationToken,
             "save"
         );
@@ -565,7 +566,7 @@ public sealed class FlaxBridgeClientTests : IDisposable
         var result = await client.SaveAsync(TestContext.Current.CancellationToken);
         await serverTask;
 
-        Assert.Equal(new FlaxEditorSaveResult(7, true), result);
+        Assert.Equal(new FlaxEditorSaveResult(7, true, 2), result);
     }
 
     [Fact]
@@ -608,6 +609,111 @@ public sealed class FlaxBridgeClientTests : IDisposable
         Assert.Equal(7, result.MainThreadId);
         Assert.Equal("System.Int32", result.TypeName);
         Assert.Equal(42, result.Result?.GetInt32());
+    }
+
+    [Fact]
+    public async Task SetPlayModeAsync_PollsUntilTheEditorReachesTheState()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var serverTask = ServeSequenceAsync(
+            pipeName,
+            TestContext.Current.CancellationToken,
+            ("play_mode", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"start\",\"isPlayMode\":false,\"isPaused\":false}}"),
+            ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
+            ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":true,\"isPaused\":false}}")
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var result = await client.SetPlayModeAsync("Start", TestContext.Current.CancellationToken);
+        await serverTask;
+
+        Assert.True(result.IsPlayMode);
+        Assert.Equal("start", result.RequestedAction);
+    }
+
+    [Fact]
+    public async Task SetPlayModeAsync_WithUnknownAction_ThrowsClientVisibleError()
+    {
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var exception = await Assert.ThrowsAsync<McpException>(()
+            => client.SetPlayModeAsync("jump", TestContext.Current.CancellationToken));
+
+        Assert.Contains("start, stop, pause, or resume", exception.Message);
+    }
+
+    [Fact]
+    public async Task CompileAsync_WhenTheBridgeReloads_ReportsReloaded()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var serverTask = ServeSequenceAsync(
+            pipeName,
+            TestContext.Current.CancellationToken,
+            ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
+            ("compile", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
+            ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}")
+        );
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var result = await client.CompileAsync(TestContext.Current.CancellationToken);
+        await serverTask;
+
+        Assert.Equal("reloaded", result.Outcome);
+        Assert.Empty(result.Errors);
+    }
+
+    [Fact]
+    public async Task CompileAsync_WhenTheCompileFails_ReportsTheLogsErrors()
+    {
+        var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
+        WriteHandshake(pipeName, DateTime.UtcNow);
+        var logs = Path.Combine(_projectFolder, "Logs");
+        Directory.CreateDirectory(logs);
+        var log = Path.Combine(logs, "Log_2026_10_14_10_00_00.txt");
+        File.WriteAllText(log, "[ 00:00:00.500 ]: [Info] an earlier line\n", Encoding.Unicode);
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var serverTask = Task.Run(async () =>
+        {
+            await ServeSequenceAsync(
+                pipeName,
+                cancellationToken,
+                ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
+                ("compile", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}")
+            );
+            File.AppendAllText(
+                log,
+                "[ 00:00:01.000 ]: [Info] C:\\Game\\Source\\A.cs(3,9,3,10): error CS1525: Invalid expression term ';'\n" +
+                "[ 00:00:01.100 ]: [Error] Failed to run build tool, result: 1\n",
+                Encoding.Unicode
+            );
+            await ServeSequenceAsync(
+                pipeName,
+                cancellationToken,
+                ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":true,\"compilationsCount\":5,\"loadedUtcTicks\":100}}")
+            );
+        }, cancellationToken);
+        var client = new FlaxBridgeClient(_projectFolder, _tempDir);
+
+        var result = await client.CompileAsync(TestContext.Current.CancellationToken);
+        await serverTask;
+
+        Assert.Equal("failed", result.Outcome);
+        Assert.Contains(result.Errors, error => error.Code == "CS1525");
+        Assert.Contains(result.BuildErrors, line => line.Contains("Failed to run build tool"));
+    }
+
+    private static async Task ServeSequenceAsync(
+        string pipeName,
+        CancellationToken cancellationToken,
+        params (string Method, string Response)[] steps)
+    {
+        foreach (var (method, response) in steps)
+        {
+            await ServeResponseAsync(pipeName, response, cancellationToken, method);
+        }
     }
 
     private async Task ServePingAsync(string pipeName, CancellationToken cancellationToken)

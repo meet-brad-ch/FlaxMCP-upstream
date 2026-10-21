@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using System.IO.Pipes;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using FlaxMcp.Flax.Models;
 using Microsoft.Extensions.Options;
 using ModelContextProtocol;
 
@@ -88,13 +90,21 @@ public interface IFlaxBridgeClient
     Task<FlaxBridgeScreenshot> CaptureScreenshotAsync(string path, CancellationToken cancellationToken = default);
 
     Task<FlaxCodeExecutionResult> ExecuteCSharpAsync(string code, CancellationToken cancellationToken = default);
+
+    Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default);
+
+    Task<FlaxEditorOpenSceneResult> OpenSceneAsync(string path, CancellationToken cancellationToken = default);
 }
 
 public sealed class FlaxBridgeClient : IFlaxBridgeClient
 {
-    internal const int CurrentProtocolVersion = 14;
+    internal const int CurrentProtocolVersion = 15;
     private static readonly TimeSpan ConnectionTimeout = TimeSpan.FromSeconds(1);
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan PlayModeWait = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan CompileWait = TimeSpan.FromSeconds(120);
+    private static readonly TimeSpan NothingToReloadAfter = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(250);
 
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
@@ -344,16 +354,132 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
         return CallAsync<FlaxEditorSaveResult>(RequireHandshake(), "save", null, cancellationToken);
     }
 
-    public Task<FlaxEditorPlayModeResult> SetPlayModeAsync(
+    public async Task<FlaxEditorPlayModeResult> SetPlayModeAsync(
         string action,
         CancellationToken cancellationToken = default)
     {
-        return CallAsync<FlaxEditorPlayModeResult>(
+        var (isPlayMode, isPaused) = ExpectedPlayState(action);
+        var state = await CallAsync<FlaxEditorPlayModeResult>(
             RequireHandshake(),
             "play_mode",
             new { action },
             cancellationToken
         );
+        var deadline = DateTime.UtcNow + PlayModeWait;
+        while (state.IsPlayMode != isPlayMode || state.IsPaused != isPaused)
+        {
+            if (DateTime.UtcNow > deadline)
+            {
+                throw new McpException(
+                    $"The Flax Editor did not complete the '{action}' play mode action within " +
+                    $"{PlayModeWait.TotalSeconds:0} seconds (play mode {state.IsPlayMode}, paused {state.IsPaused})."
+                );
+            }
+
+            await Task.Delay(PollInterval, cancellationToken);
+            state = await TryCallAsync<FlaxEditorPlayModeResult>("play_mode_state", cancellationToken) ?? state;
+        }
+
+        return state with { RequestedAction = action.ToLowerInvariant() };
+    }
+
+    private static (bool IsPlayMode, bool IsPaused) ExpectedPlayState(string action)
+    {
+        return action.ToLowerInvariant() switch
+        {
+            "start" => (true, false),
+            "stop" => (false, false),
+            "pause" => (true, true),
+            "resume" => (true, false),
+            _ => throw new McpException("Play mode action must be start, stop, pause, or resume."),
+        };
+    }
+
+    public async Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default)
+    {
+        var watch = Stopwatch.StartNew();
+        var logFile = FlaxLogReader.FindLatestLogFile(_projectFolder);
+        var logMark = logFile is null ? 0 : FlaxLogReader.ReadLog(logFile.FullName).Length;
+        var playState = await CallAsync<FlaxEditorPlayModeResult>(RequireHandshake(), "play_mode_state", null, cancellationToken);
+        if (playState.IsPlayMode)
+        {
+            await SetPlayModeAsync("stop", cancellationToken);
+        }
+
+        var started = await CallAsync<FlaxCompileStatus>(RequireHandshake(), "compile", null, cancellationToken);
+        var deadline = DateTime.UtcNow + CompileWait;
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(PollInterval, cancellationToken);
+            var status = await TryCallAsync<FlaxCompileStatus>("compile_status", cancellationToken);
+            if (status is null)
+            {
+                continue;
+            }
+
+            if (status.LoadedUtcTicks != started.LoadedUtcTicks)
+            {
+                return new FlaxEditorCompileResult("reloaded", watch.Elapsed.TotalSeconds, [], []);
+            }
+
+            if (status.IsCompiling || status.CompilationsCount <= started.CompilationsCount)
+            {
+                continue;
+            }
+
+            if (status.LastCompilationFailed)
+            {
+                return Failed(logMark, watch.Elapsed.TotalSeconds);
+            }
+
+            if (watch.Elapsed > NothingToReloadAfter)
+            {
+                return new FlaxEditorCompileResult("unchanged", watch.Elapsed.TotalSeconds, [], []);
+            }
+        }
+
+        throw new McpException($"The Flax Editor did not finish compiling within {CompileWait.TotalSeconds:0} seconds.");
+    }
+
+    private FlaxEditorCompileResult Failed(int logMark, double seconds)
+    {
+        var logFile = FlaxLogReader.FindLatestLogFile(_projectFolder);
+        var log = logFile is null ? "" : FlaxLogReader.ReadLog(logFile.FullName);
+        var since = logMark <= log.Length ? log[logMark..] : log;
+        var errors = FlaxCompilerDiagnosticParser.Parse(since).Where(diagnostic => diagnostic.Severity == "error").ToArray();
+        var buildErrors = since.Split('\n')
+            .Where(line => line.Contains("Sharing violation", StringComparison.Ordinal) ||
+                line.Contains("Failed to run build tool", StringComparison.Ordinal))
+            .Select(line => line.Trim())
+            .ToArray();
+        return new FlaxEditorCompileResult("failed", seconds, errors, buildErrors);
+    }
+
+    public Task<FlaxEditorOpenSceneResult> OpenSceneAsync(string path, CancellationToken cancellationToken = default)
+    {
+        return CallAsync<FlaxEditorOpenSceneResult>(RequireHandshake(), "open_scene", new { path }, cancellationToken);
+    }
+
+    private async Task<T?> TryCallAsync<T>(string method, CancellationToken cancellationToken) where T : class
+    {
+        var handshake = ReadHandshake();
+        if (handshake is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await CallAsync<T>(handshake, method, null, cancellationToken);
+        }
+        catch (McpException ex) when (ex.InnerException is IOException or OperationCanceledException)
+        {
+            return null;
+        }
+        catch (FlaxBridgeRequestException ex) when (ex.Code == "request_timeout")
+        {
+            return null;
+        }
     }
 
     public Task<FlaxBridgeScreenshot> CaptureScreenshotAsync(string path, CancellationToken cancellationToken = default)
@@ -428,9 +554,7 @@ public sealed class FlaxBridgeClient : IFlaxBridgeClient
             {
                 var bridgeError = error.Deserialize<FlaxBridgeError>(SerializerOptions) ??
                     throw new JsonException("The Flax Editor bridge returned an invalid error response.");
-                throw new InvalidOperationException(
-                    $"Flax Editor bridge error [{bridgeError.Code}]: {bridgeError.Message}"
-                );
+                throw new FlaxBridgeRequestException(bridgeError.Code, bridgeError.Message);
             }
 
             return root.GetProperty("result").Deserialize<T>(SerializerOptions) ??
@@ -522,11 +646,31 @@ public sealed record FlaxBridgeStatus(
 
 public sealed record FlaxBridgePing(bool Pong, DateTime UtcNow);
 
+public sealed class FlaxBridgeRequestException(string code, string message)
+    : McpException($"Flax Editor bridge error [{code}]: {message}")
+{
+    public string Code { get; } = code;
+}
+
 public sealed record FlaxBridgeScreenshot(string Path, long Bytes);
 
 public sealed record FlaxCodeExecutionResult(int MainThreadId, string? TypeName, JsonElement? Result);
 
-public sealed record FlaxEditorSaveResult(int MainThreadId, bool Saved);
+public sealed record FlaxEditorSaveResult(int MainThreadId, bool Saved, int SavedScenes);
+
+public sealed record FlaxCompileStatus(
+    bool IsCompiling,
+    bool LastCompilationFailed,
+    int CompilationsCount,
+    long LoadedUtcTicks);
+
+public sealed record FlaxEditorCompileResult(
+    string Outcome,
+    double Seconds,
+    IReadOnlyList<FlaxCompilerDiagnostic> Errors,
+    IReadOnlyList<string> BuildErrors);
+
+public sealed record FlaxEditorOpenSceneResult(int MainThreadId, string SceneId, string SceneName, IReadOnlyList<string> Scenes);
 
 public sealed record FlaxEditorPlayModeResult(
     int MainThreadId,

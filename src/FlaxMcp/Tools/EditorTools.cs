@@ -242,7 +242,11 @@ public sealed class EditorTools
     }
 
     [McpServerTool(Name = "editor_save", UseStructuredContent = true)]
-    [Description("Saves all modified scenes and content assets in the live Flax Editor.")]
+    [Description(
+        "Saves all open scenes and all changed content assets in the live Flax Editor. " +
+        "This includes changes made through the API, which the editor does not mark as changed. " +
+        "The tool refuses the request during play mode, because a save then writes the play-time scene, with all the actor scripts that the game created at run time."
+    )]
     public Task<FlaxEditorSaveResult> SaveAsync(CancellationToken cancellationToken)
     {
         return _bridgeClient.SaveAsync(cancellationToken);
@@ -250,7 +254,10 @@ public sealed class EditorTools
 
     [McpServerTool(Name = "editor_play_mode", UseStructuredContent = true)]
     [Description(
-        "Controls play mode in the live Flax Editor. Action must be start, stop, pause, or resume."
+        "Controls play mode in the live Flax Editor. " +
+        "Action must be start, stop, pause, or resume. " +
+        "The tool returns when the editor is in the requested state. " +
+        "It waits up to 30 seconds, so that a large scene has time to load."
     )]
     public Task<FlaxEditorPlayModeResult> SetPlayModeAsync(
         [Description("Play mode action: start, stop, pause, or resume.")] string action,
@@ -283,6 +290,32 @@ public sealed class EditorTools
         }
 
         return _bridgeClient.CaptureScreenshotAsync(resolvedPath, cancellationToken);
+    }
+
+    [McpServerTool(Name = "editor_compile", UseStructuredContent = true)]
+    [Description(
+        "Compiles the scripts of the project in the live Flax Editor and waits for the result, for up to 120 seconds. " +
+        "The tool stops play mode first. " +
+        "The result is 'reloaded' (the scripts and this bridge reloaded), 'unchanged' (nothing to reload), or 'failed'. " +
+        "A failed result contains the compiler errors and the build errors from the log (for example, a sharing violation)."
+    )]
+    public Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken)
+    {
+        return _bridgeClient.CompileAsync(cancellationToken);
+    }
+
+    [McpServerTool(Name = "editor_open_scene", UseStructuredContent = true)]
+    [Description(
+        "Opens a scene in the live Flax Editor and returns when the scene is loaded. " +
+        "The path is absolute or relative to the Content folder of the project (for example, Scenes/Main.scene). " +
+        "The tool refuses the request during play mode."
+    )]
+    public Task<FlaxEditorOpenSceneResult> OpenSceneAsync(
+        [Description("The scene asset path, absolute or relative to Content/, with the extension .scene.")] string path,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return _bridgeClient.OpenSceneAsync(path, cancellationToken);
     }
 
     [McpServerTool(Name = "editor_execute_csharp", UseStructuredContent = true)]

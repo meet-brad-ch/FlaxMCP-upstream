@@ -29,7 +29,8 @@ namespace FlaxMcpBridge.Editor;
 /// </summary>
 internal sealed class PipeBridgeServer : IDisposable
 {
-    private const int ProtocolVersion = 14;
+    private const int ProtocolVersion = 15;
+    private static readonly long LoadedUtcTicks = DateTime.UtcNow.Ticks;
     private const int MaxSceneGraphDepth = 32;
     private const int MaxSceneGraphNodes = 500;
     private const double AssetLoadTimeoutMilliseconds = 3500;
@@ -228,6 +229,10 @@ internal sealed class PipeBridgeServer : IDisposable
             ),
             "save" => await SaveAsync(),
             "play_mode" => await SetPlayModeAsync(RequireParam(root, "action")),
+            "play_mode_state" => await GetPlayModeStateAsync(),
+            "compile" => await CompileAsync(),
+            "compile_status" => await GetCompileStatusAsync(),
+            "open_scene" => await OpenSceneAsync(RequireParam(root, "path")),
             "screenshot" => await CaptureScreenshotAsync(RequireParam(root, "path")),
             "execute_csharp" => await ExecuteCSharpAsync(RequireParam(root, "code")),
             _ => throw new InvalidOperationException($"Unknown method '{method}'"),
@@ -1089,8 +1094,15 @@ internal sealed class PipeBridgeServer : IDisposable
 
             if (surface.Save())
                 throw new InvalidOperationException("The material graph could not be serialized.");
-            if (material.SaveSurface(owner.SurfaceData, MaterialInfo.Default))
+            // MaterialInfo.Default defaults to ShadingModel.Unlit, which would make Flax render only the
+            // Emissive input and ignore BaseColor/Roughness/Metallic entirely.
+            var info = MaterialInfo.Default;
+            info.ShadingModel = MaterialShadingModel.Lit;
+            if (material.SaveSurface(owner.SurfaceData, info))
                 throw new InvalidOperationException("The material graph could not be saved.");
+            // Without an explicit reload, actors that bind this brand-new material right after creation
+            // render it as solid black -- its GPU-side compiled representation isn't picked up otherwise.
+            material.Reload();
         }
         finally
         {
@@ -1634,15 +1646,94 @@ internal sealed class PipeBridgeServer : IDisposable
     {
         return InvokeOnUpdateAsync(() =>
         {
-            FlaxEditor.Editor.Instance.SaveAll();
-            return new { mainThreadId = Globals.MainThreadID, saved = true };
+            var editor = FlaxEditor.Editor.Instance;
+            if (FlaxEditor.Editor.IsPlayMode)
+                throw new InvalidOperationException(
+                    "The editor is in play mode: stop it before saving, or the play-time scene is written.");
+            // Changes made through the API do not mark a scene as modified, and SaveAll skips unmodified scenes.
+            foreach (var scene in Level.Scenes)
+                editor.Scene.MarkSceneEdited(scene);
+            editor.SaveAll();
+            return new { mainThreadId = Globals.MainThreadID, saved = true, savedScenes = Level.ScenesCount };
         });
+    }
+
+    private static async Task<object> GetPlayModeStateAsync()
+    {
+        var state = await ReadPlayModeStateAsync();
+        return new
+        {
+            mainThreadId = state.MainThreadId,
+            requestedAction = "state",
+            isPlayMode = state.IsPlayMode,
+            isPaused = state.IsPaused,
+        };
+    }
+
+    private static object CompileStatus() => new
+    {
+        isCompiling = FlaxEditor.ScriptsBuilder.IsCompiling,
+        lastCompilationFailed = FlaxEditor.ScriptsBuilder.LastCompilationFailed,
+        compilationsCount = FlaxEditor.ScriptsBuilder.CompilationsCount,
+        loadedUtcTicks = LoadedUtcTicks,
+    };
+
+    private static Task<object> CompileAsync()
+    {
+        return InvokeOnUpdateAsync(() =>
+        {
+            if (FlaxEditor.Editor.IsPlayMode)
+                throw new InvalidOperationException("The editor is in play mode: stop it before compiling.");
+            var before = CompileStatus();
+            FlaxEditor.ScriptsBuilder.Compile();
+            return before;
+        });
+    }
+
+    private static Task<object> GetCompileStatusAsync()
+    {
+        return InvokeOnUpdateAsync(CompileStatus);
+    }
+
+    private static async Task<object> OpenSceneAsync(string path)
+    {
+        var item = (AssetItem)await InvokeOnUpdateAsync(() =>
+        {
+            if (FlaxEditor.Editor.IsPlayMode)
+                throw new InvalidOperationException("The editor is in play mode: stop it before opening a scene.");
+            var full = Path.IsPathRooted(path) ? path : Path.Combine(Globals.ProjectContentFolder, path);
+            var found = FlaxEditor.Editor.Instance.ContentDatabase.Find(full) as AssetItem ??
+                throw new FileNotFoundException($"No scene asset at '{full}'.");
+            FlaxEditor.Editor.Instance.Scene.OpenScene(found.ID);
+            return found;
+        });
+        for (var attempt = 0; attempt < 30; attempt++)
+        {
+            var opened = await InvokeOnUpdateAsync(() =>
+            {
+                var scene = Level.Scenes.FirstOrDefault(candidate => candidate.ID == item.ID);
+                if (scene is null)
+                    return (object)null!;
+                return new
+                {
+                    mainThreadId = Globals.MainThreadID,
+                    sceneId = scene.ID.ToString(),
+                    sceneName = scene.Name,
+                    scenes = Level.Scenes.Select(candidate => candidate.Name).ToArray(),
+                };
+            });
+            if (opened is not null)
+                return opened;
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException($"The scene '{path}' did not finish loading within 3 seconds.");
     }
 
     private static async Task<object> SetPlayModeAsync(string action)
     {
         var normalizedAction = action.ToLowerInvariant();
-        var expectedState = normalizedAction switch
+        _ = normalizedAction switch
         {
             "start" => new PlayModeState(true, false),
             "stop" => new PlayModeState(false, false),
@@ -1651,7 +1742,10 @@ internal sealed class PipeBridgeServer : IDisposable
             _ => throw new ArgumentException("Play mode action must be start, stop, pause, or resume."),
         };
 
-        await InvokeOnUpdateAsync(() =>
+        // The request is queued, not awaited: starting play loads the scene on the main thread, which can take longer
+        // than one request may wait; the server polls play_mode_state until the state is reached.
+        var state = await ReadPlayModeStateAsync();
+        Scripting.InvokeOnUpdate(() =>
         {
             var editor = FlaxEditor.Editor.Instance;
             switch (normalizedAction)
@@ -1669,28 +1763,14 @@ internal sealed class PipeBridgeServer : IDisposable
                     editor.Simulation.RequestResumePlay();
                     break;
             }
-
-            return new object();
         });
-
-        for (var attempt = 0; attempt < 40; attempt++)
+        return new
         {
-            var state = await ReadPlayModeStateAsync();
-            if (state.IsPlayMode == expectedState.IsPlayMode && state.IsPaused == expectedState.IsPaused)
-            {
-                return new
-                {
-                    mainThreadId = state.MainThreadId,
-                    requestedAction = normalizedAction,
-                    isPlayMode = state.IsPlayMode,
-                    isPaused = state.IsPaused,
-                };
-            }
-
-            await Task.Delay(100);
-        }
-
-        throw new TimeoutException($"The Flax Editor did not complete the '{normalizedAction}' play mode action.");
+            mainThreadId = state.MainThreadId,
+            requestedAction = normalizedAction,
+            isPlayMode = state.IsPlayMode,
+            isPaused = state.IsPaused,
+        };
     }
 
     private static Task<PlayModeState> ReadPlayModeStateAsync()
@@ -1775,6 +1855,19 @@ internal sealed class PipeBridgeServer : IDisposable
         return execution.Result;
     }
 
+    private static string? ReferencePath(Assembly assembly)
+    {
+        if (!string.IsNullOrEmpty(assembly.Location))
+            return assembly.Location;
+        var binaries = Path.Combine(Globals.ProjectFolder, "Binaries");
+        var name = assembly.GetName().Name;
+        if (name is null || !Directory.Exists(binaries))
+            return null;
+        return Directory.EnumerateFiles(binaries, name + ".dll", SearchOption.AllDirectories)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static async Task<(object Result, WeakReference LoadContext)> ExecuteInCollectibleContextAsync(string code)
     {
@@ -1796,11 +1889,18 @@ internal sealed class PipeBridgeServer : IDisposable
                 }
             }
             """;
+        // A script reload that cannot unload the old assemblies leaves several copies of the game's assemblies loaded; only
+        // the newest copy of each name is referenced, or a snippet naming a game type is ambiguous.
         var loadedAssemblies = AppDomain.CurrentDomain.GetAssemblies()
-            .Where(assembly => !assembly.IsDynamic && !string.IsNullOrEmpty(assembly.Location))
+            .Where(assembly => !assembly.IsDynamic)
+            .GroupBy(assembly => assembly.GetName().Name)
+            .Select(group => group.Last())
             .ToArray();
+        // The game's script assemblies are loaded from memory (no Location): they are referenced through their newest
+        // built file, so a snippet can name a game type.
         var references = loadedAssemblies
-            .Select(assembly => assembly.Location)
+            .Select(ReferencePath)
+            .OfType<string>()
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Select(path => MetadataReference.CreateFromFile(path));
         var compilation = CSharpCompilation.Create(

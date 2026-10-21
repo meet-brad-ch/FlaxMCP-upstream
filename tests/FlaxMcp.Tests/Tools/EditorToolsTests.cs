@@ -298,7 +298,7 @@ public sealed class EditorToolsTests
     [Fact]
     public async Task SaveAsync_ReturnsBridgeResult()
     {
-        var expected = new FlaxEditorSaveResult(12, true);
+        var expected = new FlaxEditorSaveResult(12, true, 1);
         var bridge = new StubBridgeClient { SaveResult = expected };
         var tool = new EditorTools(bridge);
 
@@ -353,6 +353,31 @@ public sealed class EditorToolsTests
 
         await Assert.ThrowsAsync<DirectoryNotFoundException>(() =>
             tool.CaptureScreenshotAsync(path, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task CompileAsync_ReturnsBridgeResult()
+    {
+        var expected = new FlaxEditorCompileResult("reloaded", 1.2, [], []);
+        var bridge = new StubBridgeClient { CompileResult = expected };
+        var tool = new EditorTools(bridge);
+
+        var result = await tool.CompileAsync(TestContext.Current.CancellationToken);
+
+        Assert.Same(expected, result);
+    }
+
+    [Fact]
+    public async Task OpenSceneAsync_ForwardsPath()
+    {
+        var expected = new FlaxEditorOpenSceneResult(12, "abc", "Main", ["Main"]);
+        var bridge = new StubBridgeClient { OpenSceneResult = expected };
+        var tool = new EditorTools(bridge);
+
+        var result = await tool.OpenSceneAsync("Scenes/Main.scene", TestContext.Current.CancellationToken);
+
+        Assert.Same(expected, result);
+        Assert.Equal("Scenes/Main.scene", bridge.ScenePath);
     }
 
     [Fact]
@@ -445,7 +470,7 @@ public sealed class EditorToolsTests
 
         public Exception? CreateBoxColliderException { get; set; }
 
-        public FlaxEditorSaveResult SaveResult { get; set; } = new(0, true);
+        public FlaxEditorSaveResult SaveResult { get; set; } = new(0, true, 0);
 
         public FlaxEditorPlayModeResult PlayModeResult { get; set; } = new(0, "stop", false, false);
 
@@ -674,6 +699,23 @@ public sealed class EditorToolsTests
         {
             Code = code;
             return Task.FromResult(CodeExecutionResult);
+        }
+
+        public FlaxEditorCompileResult CompileResult { get; set; } = new("unchanged", 0, [], []);
+
+        public FlaxEditorOpenSceneResult OpenSceneResult { get; set; } = new(0, "", "", []);
+
+        public string? ScenePath { get; private set; }
+
+        public Task<FlaxEditorCompileResult> CompileAsync(CancellationToken cancellationToken = default)
+        {
+            return Task.FromResult(CompileResult);
+        }
+
+        public Task<FlaxEditorOpenSceneResult> OpenSceneAsync(string path, CancellationToken cancellationToken = default)
+        {
+            ScenePath = path;
+            return Task.FromResult(OpenSceneResult);
         }
     }
 }
