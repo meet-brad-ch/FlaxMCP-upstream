@@ -77,9 +77,14 @@ public sealed class BridgeHostServerTests : IDisposable
     public async Task Request_InFlightWhenThePluginDetaches_FailsWithInterruptedByReload()
     {
         var never = new TaskCompletionSource<string>();
-        _host.Attach(Plugin(5, line => never.Task));
+        var dispatched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _host.Attach(Plugin(5, line =>
+        {
+            dispatched.TrySetResult();
+            return never.Task;
+        }));
         var answer = AskAsync("{\"id\":9,\"method\":\"execute_csharp\"}");
-        await Task.Delay(100, TestContext.Current.CancellationToken);
+        await dispatched.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         _host.Detach(5);
 
@@ -120,8 +125,19 @@ public sealed class BridgeHostServerTests : IDisposable
     public async Task Requests_FromTwoClientsAtOnce_AreBothAnswered()
     {
         var release = new TaskCompletionSource<string>();
-        _host.Attach(Plugin(1, line => line.Contains("slow") ? release.Task : Task.FromResult("{\"id\":2,\"result\":\"fast\"}")));
+        var slowDispatched = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _host.Attach(Plugin(1, line =>
+        {
+            if (!line.Contains("slow"))
+            {
+                return Task.FromResult("{\"id\":2,\"result\":\"fast\"}");
+            }
+
+            slowDispatched.TrySetResult();
+            return release.Task;
+        }));
         var slow = AskAsync("{\"id\":1,\"method\":\"slow\"}");
+        await slowDispatched.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
         var fast = await AskAsync("{\"id\":2,\"method\":\"fast\"}");
         release.SetResult("{\"id\":1,\"result\":\"slow\"}");

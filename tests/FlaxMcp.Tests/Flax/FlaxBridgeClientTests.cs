@@ -648,9 +648,10 @@ public sealed class FlaxBridgeClientTests : IDisposable
     {
         var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
         WriteHandshake(pipeName, DateTime.UtcNow);
-        var serverTask = ServeSequenceAsync(
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var serverTask = ServeThenRepeatLastAsync(
             pipeName,
-            TestContext.Current.CancellationToken,
+            stop.Token,
             ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
             ("compile", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
             ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
@@ -661,6 +662,7 @@ public sealed class FlaxBridgeClientTests : IDisposable
         var client = new FlaxBridgeClient(_projectFolder, _tempDir);
 
         var result = await client.CompileAsync(TestContext.Current.CancellationToken);
+        stop.Cancel();
         await serverTask;
 
         Assert.Equal("reloaded", result.Outcome);
@@ -674,9 +676,10 @@ public sealed class FlaxBridgeClientTests : IDisposable
         var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
         WriteHandshake(pipeName, DateTime.UtcNow);
         var settled300 = "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":6,\"loadedUtcTicks\":300}}";
-        var serverTask = ServeSequenceAsync(
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var serverTask = ServeThenRepeatLastAsync(
             pipeName,
-            TestContext.Current.CancellationToken,
+            stop.Token,
             ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
             ("compile", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
             ("compile_status", "{\"id\":1,\"result\":{\"isCompiling\":false,\"lastCompilationFailed\":false,\"compilationsCount\":5,\"loadedUtcTicks\":200}}"),
@@ -689,6 +692,7 @@ public sealed class FlaxBridgeClientTests : IDisposable
         var client = new FlaxBridgeClient(_projectFolder, _tempDir);
 
         var result = await client.CompileAsync(TestContext.Current.CancellationToken);
+        stop.Cancel();
         await serverTask;
 
         Assert.Equal("reloaded", result.Outcome);
@@ -782,9 +786,10 @@ public sealed class FlaxBridgeClientTests : IDisposable
         var pipeName = "FlaxMcpTests-" + Guid.NewGuid().ToString("N");
         WriteHandshake(pipeName, DateTime.UtcNow);
         var cancellationToken = TestContext.Current.CancellationToken;
-        var serverTask = ServeSequenceAsync(
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var serverTask = ServeThenRepeatLastAsync(
             pipeName,
-            cancellationToken,
+            stop.Token,
             ("play_mode_state", "{\"id\":1,\"result\":{\"mainThreadId\":7,\"requestedAction\":\"state\",\"isPlayMode\":false,\"isPaused\":false}}"),
             ("compile", "{\"id\":1,\"result\":{\"isCompiling\":true,\"lastCompilationFailed\":false,\"compilationsCount\":4,\"loadedUtcTicks\":100}}"),
             ("compile_status", "{\"id\":1,\"error\":{\"code\":\"plugin_not_attached\",\"message\":\"reloading\"}}"),
@@ -795,6 +800,7 @@ public sealed class FlaxBridgeClientTests : IDisposable
         var client = new FlaxBridgeClient(_projectFolder, _tempDir);
 
         var result = await client.CompileAsync(cancellationToken);
+        stop.Cancel();
         await serverTask;
 
         Assert.Equal("reloaded", result.Outcome);
@@ -894,6 +900,41 @@ public sealed class FlaxBridgeClientTests : IDisposable
         Assert.True(result.Matched);
         Assert.Equal(13, result.Event!.Seq);
         Assert.Equal("[Test] status: ok", result.Event.Text);
+    }
+
+    /// <summary>
+    /// Serves the steps in order, then answers every later request with the last step's response until stopped: a
+    /// client that polls until a state holds may need more answers than a fixed list (one failed poll restarts its wait).
+    /// </summary>
+    private static async Task ServeThenRepeatLastAsync(
+        string pipeName,
+        CancellationToken stop,
+        params (string Method, string Response)[] steps)
+    {
+        var pipe = CreateSequencePipe(pipeName);
+        try
+        {
+            for (var i = 0; ; i++)
+            {
+                await pipe.WaitForConnectionAsync(stop);
+                var next = CreateSequencePipe(pipeName);
+                var step = steps[Math.Min(i, steps.Length - 1)];
+                await using (pipe)
+                {
+                    await AnswerAsync(pipe, step.Method, step.Response, null, stop);
+                }
+
+                pipe = next;
+            }
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
+        {
+            // The test stopped the fake bridge after the client returned.
+        }
+        finally
+        {
+            await pipe.DisposeAsync();
+        }
     }
 
     private static async Task ServeSequenceAsync(
